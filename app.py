@@ -4,7 +4,7 @@ import requests
 from datetime import datetime, timedelta
 import time
 
-st.set_page_config(page_title="老周法人真愛分析 終極版", layout="wide")
+st.set_page_config(page_title="法人真愛分析 終極版", layout="wide")
 st.title("🛡️ 操盤手終極版 - 買點定位系統")
 
 GAS_URL = "https://script.google.com/macros/s/AKfycbxmoO3M1vsgwUStzDvDY5uRebEo_EGu79-FWSCLzSJYsB5Kz33h2WE8CuhBGEBAsjO7/exec"
