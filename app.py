@@ -5,111 +5,95 @@ from datetime import datetime
 import time
 import re
 
-st.set_page_config(page_title="專業操盤系統-全欄位精確版", layout="wide")
-st.title("🛡️ 買點定位系統 (全欄位完整對齊版)")
+st.set_page_config(page_title="買點定位系統", layout="wide")
+st.title("🛡️ 買點定位系統 (12欄位全對齊版)")
 
 GAS_URL = "https://script.google.com/macros/s/AKfycbxmoO3M1vsgwUStzDvDY5uRebEo_EGu79-FWSCLzSJYsB5Kz33h2WE8CuhBGEBAsjO7/exec"
 
-st.sidebar.header("📅 交易時間軸")
-start_date = st.sidebar.date_input("分析起始日期", datetime(2026, 4, 20))
-end_date = st.sidebar.date_input("分析結束日期", datetime(2026, 4, 30))
+# 介面設定
+st.sidebar.header("日期選擇")
+start_date = st.sidebar.date_input("開始日期", datetime(2026, 4, 20))
+end_date = st.sidebar.date_input("結束日期", datetime(2026, 4, 30))
 
-def clean_to_num(val, divide=1):
-    """精確數值清洗：移除逗號並處理張數轉換"""
+def fetch_data(d_str):
     try:
-        s = str(val).replace(',', '').replace(' ', '').strip()
-        return float(s) / divide
-    except:
-        return 0.0
-
-def get_live_data(stock_id):
-    """
-    從 Google Finance 抓取即時價格與 52 週範圍 (模擬 MA5 參考)
-    並修正查無價格的問題
-    """
-    url = f"https://www.google.com/finance/quote/{stock_id}:TPE"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        # 抓取現價
-        p_match = re.search(r'data-last-price="([\d\.]+)"', resp.text)
-        # 抓取 MA5 參考 (從網頁結構中尋找最近的支撐位或均價數據)
-        if p_match:
-            price = float(p_match.group(1))
-            # 由於原生無法直接抓歷史 MA5，我們透過現價進行合理的價差計算模擬
-            # 或建議用戶參考最後交易日與前幾日之價差
-            return price
-    except:
-        pass
+        url = f"{GAS_URL}?date={d_str.replace('-', '')}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            json_data = resp.json()
+            if json_data.get('stat') == 'OK' and json_data.get('data'):
+                df = pd.DataFrame(json_data['data'], columns=json_data['fields'])
+                df.columns = [c.strip() for c in df.columns]
+                df['日期'] = d_str
+                return df
+    except: pass
     return None
 
-if st.button("🚀 啟動全欄位數據掃描"):
-    date_list = pd.date_range(start=start_date, end=end_date).strftime("%Y-%m-%d").tolist()
-    all_data = []
+def get_price(sid):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        url = f"https://www.google.com/finance/quote/{sid}:TPE"
+        r = requests.get(url, headers=headers, timeout=5)
+        m = re.search(r'data-last-price="([\d\.]+)"', r.text)
+        if m: return float(m.group(1))
+    except: pass
+    return 0.0
+
+if st.button("執行全欄位分析"):
+    dates = pd.date_range(start=start_date, end=end_date).strftime("%Y-%m-%d").tolist()
+    all_dfs = []
     
-    with st.spinner("正在逐日校準法人籌碼與價格欄位..."):
-        for d in date_list:
-            try:
-                clean_d = d.replace("-", "")
-                r = requests.get(f"{GAS_URL}?date={clean_d}", timeout=10)
-                json_data = r.json()
-                if json_data.get('stat') == 'OK' and json_data.get('data'):
-                    df = pd.DataFrame(json_data['data'], columns=json_data['fields'])
-                    df.columns = [c.strip() for c in df.columns]
-                    df['日期'] = d
-                    all_data.append(df)
-            except: pass
-            time.sleep(0.05)
-
-    if all_data:
-        full_df = pd.concat(all_data, ignore_index=True)
-        # 核心欄位定義
-        f_col = '外陸資買賣超股數(不含外資自營商)'
-        i_col = '投信買賣超股數'
-        p_col = '收盤價' # GAS 裡面如果有的話
-
-        last_date = full_df['日期'].max()
-        latest = full_df[full_df['日期'] == last_date].copy()
-
+    prog = st.progress(0)
+    for i, d in enumerate(dates):
+        df = fetch_data(d)
+        if df is not None: all_dfs.append(df)
+        prog.progress((i + 1) / len(dates))
+    
+    if all_dfs:
+        full_df = pd.concat(all_dfs, ignore_index=True)
+        f_col, i_col, p_col = '外陸資買賣超股數(不含外資自營商)', '投信買賣超股數', '收盤價'
+        def to_num(v): return pd.to_numeric(str(v).replace(',', ''), errors='coerce') or 0
+        
+        last_d = full_df['日期'].max()
+        latest = full_df[full_df['日期'] == last_d].copy()
+        
         results = []
         for _, row in latest.iterrows():
             sid = row['證券代號']
-            # 1. 買超張數計算 (股轉張)
-            f_buy = clean_to_num(row[f_col], 1000)
-            i_buy = clean_to_num(row[i_col], 1000)
+            f_buy = to_num(row[f_col]) / 1000
+            i_buy = to_num(row[i_col]) / 1000
             total_buy = round(f_buy + i_buy, 0)
             
-            if total_buy > 100: # 門檻過濾
-                # 2. 價格與 MA5 計算
-                curr_p = get_live_data(sid)
+            if total_buy > 100:
+                s_hist = full_df[full_df['證券代號'] == sid]
+                prices = [to_num(x) for x in s_hist[p_col].tolist() if to_num(x) > 0]
                 
-                # 計算該區間的歷史均價作為 MA5 參考
-                stock_history = full_df[full_df['證券代號'] == sid]
-                history_prices = [clean_to_num(x) for x in stock_history[p_col].tolist() if x]
-                ma5 = round(sum(history_prices) / len(history_prices), 2) if history_prices else (curr_p if curr_p else 0)
-                
-                # 3. 價差 %
-                diff_pct = ((curr_p - ma5) / ma5) if ma5 and curr_p else 0
-                
-                # 4. 連續天數
-                days = len(stock_history['日期'].unique())
+                ma5 = round(sum(prices) / len(prices), 2) if prices else 0
+                curr_p = get_price(sid) or (prices[-1] if prices else 0)
+                diff_pct = (curr_p - ma5) / ma5 if ma5 > 0 else 0
+                days = len(s_hist['日期'].unique())
 
+                # 完全參照 image_e2893b.png 的 12 個欄位順序與名稱
                 results.append({
+                    '日期': last_d,
                     '股票代號': sid,
                     '股票名稱': row['證券名稱'],
-                    '法人買超(張)': int(total_buy),
-                    '目前現價': curr_p if curr_p else "連線中",
+                    '關鍵分點': "三大法人",
+                    '買超張數': int(total_buy),
                     '5日均價': ma5,
+                    '目前現價': curr_p,
                     '價差%': f"{diff_pct:.2%}",
-                    '連續天數': f"{days}天",
-                    '操盤建議': "💎 雙強初現" if total_buy > 500 and days <= 2 else "🔥 趨勢續強"
+                    '連續出現天數': days,
+                    '集保人數變動': "無數據",
+                    '最佳購買日期': last_d if abs(diff_pct) < 0.01 else "觀望",
+                    '操盤建議': "雙強初現" if total_buy > 500 and days <= 2 else "趨勢續強"
                 })
 
         if results:
-            final_df = pd.DataFrame(results).sort_values('法人買超(張)', ascending=False).head(20)
-            st.success(f"✅ 全欄位校準完畢！數據日期：{last_date}")
-            st.dataframe(final_df, use_container_width=True, hide_index=True)
+            # 確保輸出欄位順序與圖片完全一致
+            final_cols = ['日期', '股票代號', '股票名稱', '關鍵分點', '買超張數', '5日均價', '目前現價', '價差%', '連續出現天數', '集保人數變動', '最佳購買日期', '操盤建議']
+            st.dataframe(pd.DataFrame(results)[final_cols].sort_values('買超張數', ascending=False), use_container_width=True, hide_index=True)
         else:
-            st.warning("符合門檻的股票目前無資料。")
+            st.warning("無符合門檻標的。")
     else:
-        st.error("未能從 GAS 獲取數據。")
+        st.error("區間內無交易數據。")
