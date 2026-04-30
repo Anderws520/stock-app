@@ -4,64 +4,85 @@ import requests
 from datetime import datetime, timedelta
 import time
 
-st.set_page_config(page_title="老周法人真愛分析 (Google 版)", layout="wide")
-st.title("🚀 老周法人真愛股 - 穩定不卡頓版")
+st.set_page_config(page_title="法人真愛分析", layout="wide")
+st.title("🚀 法人真愛股 - 日期自選版")
 
-# 💡 已經填入老周提供的 Google 中繼站網址
 GAS_URL = "https://script.google.com/macros/s/AKfycbxmoO3M1vsgwUStzDvDY5uRebEo_EGu79-FWSCLzSJYsB5Kz33h2WE8CuhBGEBAsjO7/exec"
 
-st.sidebar.header("分析設定")
-days_to_check = st.sidebar.slider("比對過去幾天？", 2, 5, 2)
+# --- 側邊欄：從拉霸改成日期輸入框 ---
+st.sidebar.header("📅 查詢區間設定")
+# 預設結束日期為今天，開始日期為 7 天前
+start_date = st.sidebar.date_input("開始日期", datetime.now() - timedelta(days=7))
+end_date = st.sidebar.date_input("結束日期", datetime.now())
 
-def get_data_via_gas(date_str):
+if start_date > end_date:
+    st.sidebar.error("錯誤：開始日期不能晚於結束日期")
+
+def get_data(date_str):
     try:
-        # 改成找 Google 中繼站要資料，Google 的 IP 不會被證交所擋
         resp = requests.get(f"{GAS_URL}?date={date_str}", timeout=20)
         if resp.status_code == 200:
             json_data = resp.json()
             if json_data.get('stat') == 'OK':
                 df = pd.DataFrame(json_data['data'], columns=json_data['fields'])
+                df['日期'] = f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:]}"
                 return df
-    except Exception as e:
-        return None
+    except: return None
     return None
 
-if st.button("🔍 啟動 Google 穩定分析"):
-    all_dfs = []
-    # Google 版很穩，我們直接從今天開始抓
-    curr = datetime.now()
-    attempts = 0
+if st.button("🔍 依照日期區間執行同步"):
+    # 生成日期清單
+    date_list = pd.date_range(start=start_date, end=end_date).strftime("%Y%m%d").tolist()
+    date_list.reverse() # 從最新的開始抓
     
-    status_text = st.empty()
+    all_data_list = []
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    with st.spinner("正在透過 Google 傳送資料..."):
-        while len(all_dfs) < days_to_check and attempts < 10:
-            d_str = curr.strftime("%Y%m%d")
-            status_text.text(f"正在請求 {d_str} 的資料...")
-            
-            df = get_data_via_gas(d_str)
-            
+    with st.spinner("正在穿越時空抓取數據..."):
+        for i, d_str in enumerate(date_list):
+            status_text.text(f"正在同步 {d_str} 的資料...")
+            df = get_data(d_str)
             if df is not None:
-                all_dfs.append(df)
-                st.write(f"✅ {d_str} 透過 Google 抓取成功！")
-                # 既然透過 Google，裝死時間可以縮短，0.5秒就夠了
-                time.sleep(0.5)
-            else:
-                # 沒抓到通常是假日（週六日）
-                pass
+                all_data_list.append(df)
             
-            curr -= timedelta(days=1)
-            attempts += 1
-            progress_bar.progress(min(attempts / 10, 1.0))
+            # 更新進度條
+            progress_bar.progress((i + 1) / len(date_list))
+            # 透過 Google 抓，速度可以快一點
+            time.sleep(0.2)
             
-        if len(all_dfs) >= 2:
-            base = all_dfs[0].copy()
-            # 連連看邏輯：找出這幾天都有出現的證券代號
-            for other in all_dfs[1:]:
-                base = base[base['證券代號'].isin(other['證券代號'])]
+        if len(all_data_list) >= 1:
+            full_df = pd.concat(all_data_list)
             
-            st.success(f"老周，大功告成！連續 {len(all_dfs)} 天進榜名單：")
-            st.dataframe(base, use_container_width=True)
+            # 轉換數字並計算張數
+            for col in ['外陸資買賣超股數(不含外資自營商)', '投信買賣超股數', '自營商買賣超股數']:
+                full_df[col] = full_df[col].str.replace(',','').astype(float)
+            
+            full_df['買超張數'] = (full_df['外陸資買賣超股數(不含外資自營商)'] + 
+                               full_df['投信買賣超股數'] + 
+                               full_df['自營商買賣超股數']) / 1000
+            
+            # 計算在這個區間內，股票出現過幾次
+            counts = full_df.groupby('證券代號').size().to_dict()
+            full_df['連續出現天數'] = full_df['證券代號'].map(counts)
+            
+            # 格式復刻
+            excel_df = pd.DataFrame({
+                '日期': full_df['日期'],
+                '股票代號': full_df['證券代號'],
+                '股票名稱': full_df['證券名稱'],
+                '關鍵分點': '三大法人',
+                '買超張數': full_df['買超張數'].round(0),
+                '5日均價': '-', 
+                '目前現價': '-', 
+                '價差%': '-',   
+                '連續出現天數': full_df['連續出現天數'],
+                '集保人數變動': '無數據'
+            })
+            
+            excel_df = excel_df.sort_values(by=['日期', '買超張數'], ascending=[False, False])
+            
+            st.success(f"同步完成！共分析 {len(date_list)} 天，找到 {len(excel_df)} 筆紀錄。")
+            st.dataframe(excel_df, use_container_width=True, hide_index=True)
         else:
-            st.error("目前的搜尋範圍內找不到足夠的資料，建議確認今天是否為開盤日。")
+            st.error("所選區間內抓不到資料，請確認是否包含交易日。")
