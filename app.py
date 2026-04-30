@@ -4,83 +4,87 @@ import requests
 from datetime import datetime, timedelta
 import time
 
-st.set_page_config(page_title="老周法人真愛分析", layout="wide")
-st.title("🚀 老周法人真愛股 - 籌碼大集結版")
+st.set_page_config(page_title="老周法人真愛分析 3.0", layout="wide")
+st.title("🛡️ 操盤手終極版 - 買點定位系統")
 
 GAS_URL = "https://script.google.com/macros/s/AKfycbxmoO3M1vsgwUStzDvDY5uRebEo_EGu79-FWSCLzSJYsB5Kz33h2WE8CuhBGEBAsjO7/exec"
 
-st.sidebar.header("📅 查詢區間設定")
-start_date = st.sidebar.date_input("開始日期", datetime.now() - timedelta(days=7))
+st.sidebar.header("📅 戰略分析區間")
+start_date = st.sidebar.date_input("開始日期", datetime.now() - timedelta(days=14)) # 建議選長一點
 end_date = st.sidebar.date_input("結束日期", datetime.now())
 
 def get_data(date_str):
     try:
-        # 加隨機數強制更新 4/30 資料
-        resp = requests.get(f"{GAS_URL}?date={date_str}&t={time.time()}", timeout=25)
+        resp = requests.get(f"{GAS_URL}?date={date_str}&t={time.time()}", timeout=30)
         if resp.status_code == 200:
             json_data = resp.json()
             if json_data.get('stat') == 'OK':
                 df = pd.DataFrame(json_data['data'], columns=json_data['fields'])
-                df['日期'] = f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:]}"
+                df['日期'] = date_str
+                df.columns = [c.strip() for c in df.columns]
                 
-                # 轉數字計算
-                cols = ['外陸資買賣超股數(不含外資自營商)', '投信買賣超股數', '自營商買賣超股數']
-                for col in cols:
-                    df[col] = df[col].str.replace(',','').replace('', '0').astype(float)
+                for col in ['外陸資買賣超股數(不含外資自營商)', '投信買賣超股數', '自營商買賣超股數']:
+                    df[col] = df[col].astype(str).str.replace(',','').replace('', '0').astype(float)
                 
-                df['外資張'] = df['外陸資買賣超股數(不含外資自營商)'] / 1000
-                df['投信張'] = df['投信買賣超股數'] / 1000
-                df['買超張數'] = (df['外資張'] + df['投信張'] + (df['自營商買賣超股數'].astype(float)/1000))
-                
-                # 💡 核心篩選條件：1.合計買超 > 0, 2.投信買超 > 0
-                mask = (df['買超張數'] > 0) & (df['投信張'] > 0)
-                return df[mask]
+                df['外資張'] = (df['外陸資買賣超股數(不含外資自營商)'] / 1000).round(0)
+                df['投信張'] = (df['投信買賣超股數'] / 1000).round(0)
+                df['合計買超'] = df['外資張'] + df['投信張'] + (df['自營商買賣超股數']/1000).round(0)
+                return df[df['合計買超'] > 100]
     except: return None
     return None
 
-if st.button("🔍 執行最強籌碼篩選"):
-    date_list = pd.date_range(start=start_date, end=end_date).strftime("%Y%m%d").tolist()
-    date_list.reverse()
+if st.button("📈 執行買點定位分析"):
+    date_range = pd.date_range(start=start_date, end=end_date).strftime("%Y%m%d").tolist()
+    all_raw_data = []
     
-    all_data_list = []
-    status_text = st.empty()
-    
-    with st.spinner("正在比對法人與集保數據..."):
-        for d_str in date_list:
-            status_text.text(f"掃描 {d_str} 中...")
+    with st.spinner("正在掃描歷史籌碼發動訊號..."):
+        for d_str in date_range:
             df = get_data(d_str)
             if df is not None and not df.empty:
-                all_data_list.append(df)
+                all_raw_data.append(df)
             time.sleep(0.3)
             
-        if len(all_data_list) >= 1:
-            full_df = pd.concat(all_data_list)
+        if len(all_raw_data) >= 1:
+            full_df = pd.concat(all_raw_data)
             
-            # 計算連續出現天數
-            counts = full_df.groupby('證券代號').size().to_dict()
-            full_df['連續出現天數'] = full_df['證券代號'].map(counts)
+            # --- 核心邏輯：計算每支股票的「最佳買點」 ---
+            results = []
+            for stock_id, group in full_df.groupby('證券代號'):
+                group = group.sort_values('日期') # 照時間排
+                
+                # 1. 第一次出現雙強同買的日子
+                strong_days = group[(group['外資張'] > 0) & (group['投信張'] > 0)]
+                if not strong_days.empty:
+                    best_date = strong_days.iloc[0]['日期']
+                    advice = "💎 雙強初現(首選)"
+                else:
+                    best_date = group.iloc[0]['日期']
+                    advice = "⚖️ 籌碼首日轉強"
+                
+                # 2. 如果最新一天買超張數暴增，建議為當日
+                latest_day = group.iloc[-1]
+                if len(group) > 1 and latest_day['合計買超'] > group.iloc[-2]['合計買超'] * 1.5:
+                    best_date = latest_day['日期']
+                    advice = "🚀 買力爆發日"
+                
+                # 整理該股票在最新一天的資訊
+                last_info = group.iloc[-1]
+                results.append({
+                    '日期': last_info['日期'],
+                    '代號': stock_id,
+                    '名稱': last_info['證券名稱'],
+                    '今日合計': int(last_info['合計買超']),
+                    '投信張': int(last_info['投信張']),
+                    '連榜天數': len(group),
+                    '最佳購買日期': f"{best_date[:4]}/{best_date[4:6]}/{best_date[6:]}",
+                    '操盤建議': advice
+                })
             
-            # 💡 模擬集保人數變動 (因週更特性，這部分在 App 中暫以隨機變動模擬，待串接集保 API)
-            # 這裡幫你預留排序權重：集保變動越小越好 (越負值越好)
+            final_df = pd.DataFrame(results)
+            # 排序：日期最新 -> 連榜天數多 -> 買力
+            final_df = final_df.sort_values(by=['日期', '連榜天數', '今日合計'], ascending=[False, False, False])
             
-            excel_df = pd.DataFrame({
-                '日期': full_df['日期'],
-                '股票代號': full_df['證券代號'],
-                '股票名稱': full_df['證券名稱'],
-                '關鍵分點': '三大法人',
-                '買超張數': full_df['買超張數'].round(0).astype(int),
-                '投信張數': full_df['投信張'].round(0).astype(int),
-                '連續出現天數': full_df['連續出現天數'],
-                '集保變動': -120 # 這裡建議手動觀察，或待我們下一版串接週五數據
-            })
-            
-            # 💡 終極排序：日期(新) -> 連續天數(多) -> 買超張數(多)
-            excel_df = excel_df.sort_values(by=['日期', '連續出現天數', '買超張數'], ascending=[False, False, False])
-            
-            # 每一天只取前 20 檔
-            final_df = excel_df.groupby('日期').head(20)
-            
-            st.success("老周，這是你要的『法人愛、散戶甩』精選名單！")
+            st.success("老周，買點定位完成！重點關注『最佳購買日期』為今日或昨天的標的。")
             st.dataframe(final_df, use_container_width=True, hide_index=True)
         else:
-            st.error("找不到符合篩選條件的股票，請確認資料是否已更新。")
+            st.warning("查無符合籌碼條件的標的。")
