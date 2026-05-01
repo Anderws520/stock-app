@@ -31,7 +31,6 @@ with st.sidebar:
             confirm_delete = st.checkbox("我確定要刪除目前的歷史資料")
             if confirm_delete and st.button("🧨 執行重置並重新補帳", type="primary"):
                 st.session_state.do_update = True
-        elif pwd_input != "": st.error("❌ 密碼錯誤")
 
 # ====================== 2. 通用核心函數 ======================
 def is_trading_day(d):
@@ -65,6 +64,7 @@ def download_t86(date):
 # ====================== 3. 主畫面業務邏輯 ======================
 st.header(f"📈 {mode}")
 
+# --- 分頁 A: 今日強勢戰報 ---
 if mode == "今日強勢戰報":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
@@ -102,6 +102,7 @@ if mode == "今日強勢戰報":
                              column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
     else: st.warning("請先完成資料補帳。")
 
+# --- 分頁 B: 籌碼週期分析 (欄位全整合) ---
 elif mode == "籌碼週期分析":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE).sort_values(['證券代號', '日期'])
@@ -110,13 +111,15 @@ elif mode == "籌碼週期分析":
         
         active_stocks = db[db['連買計數'] >= 3]['證券代號'].unique()
         results = []
-        with st.status("🔄 正在進行前瞻性支撐壓力分析...") as status:
+        with st.status("🔄 正在整合基礎數據與前瞻規劃...") as status:
             codes = active_stocks[:40].tolist()
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
             price_data = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
             
             for code in codes:
                 s_data = db[db['證券代號'] == code].copy()
+                entry_points = s_data[s_data['連買計數'] == 1]['日期'].tolist()
+                
                 for suf in [".TW", ".TWO"]:
                     t = f"{code}{suf}"
                     if t in price_data.columns.levels[0]:
@@ -125,26 +128,27 @@ elif mode == "籌碼週期分析":
                             curr_p = round(float(p_df['Close'].iloc[-1]), 2)
                             ma5_p = round(float(p_df['Close'].tail(5).mean()), 2)
                             
-                            # --- 優化後的進出場邏輯 ---
-                            avg_range = (p_df['High'] - p_df['Low']).tail(10).mean() # 10日平均震幅
-                            # 建議買價：取 5日線與近期支撐的交集，代表回測點
+                            # 前瞻性邏輯
+                            avg_range = (p_df['High'] - p_df['Low']).tail(10).mean()
                             buy_suggest = round(min(ma5_p, p_df['Low'].tail(3).min()), 2)
-                            # 建議賣價：從現價加上 1.5 倍平均震幅，代表預期爆發壓力位
                             sell_suggest = round(curr_p + (avg_range * 1.5), 2)
                             
                             last_c = s_data.iloc[-1]['連買計數']
                             results.append({
                                 "代號": code, "名稱": s_data['證券名稱'].iloc[0],
-                                "目前現價": curr_p, "5日均線": ma5_p, "價差%": ((curr_p - ma5_p) / ma5_p * 100),
-                                "今日狀態": "🟢 剛發動" if last_c == 1 else f"⚪ 連買 {int(last_c)} 天",
+                                "目前現價": curr_p, "5日均價": ma5_p, "價差%": ((curr_p - ma5_p) / ma5_p * 100),
                                 "建議買點(支撐)": buy_suggest,
                                 "預期賣點(壓力)": sell_suggest,
-                                "最佳購買日期": "🔥 就在今天" if last_c == 1 else "⏳ 等待回測"
+                                "今日狀態": "🟢 剛發動" if last_c == 1 else f"⚪ 連買 {int(last_c)} 天",
+                                "最佳購買日期": "🔥 就在今天" if last_c == 1 else "⏳ 等待回測",
+                                "歷史發動點": " → ".join([d.strftime('%m/%d') for d in entry_points[-3:]])
                             })
                             break
-            status.update(label="✅ 前瞻分析完成！", state="complete")
-        st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True,
-                     column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
+            status.update(label="✅ 完整週期分析已自動完成！", state="complete")
+        
+        if results:
+            st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True,
+                         column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
 
 # --- 背景重置邏輯 ---
 if "do_update" in st.session_state and st.session_state.do_update:
