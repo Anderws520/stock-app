@@ -13,15 +13,35 @@ import yfinance as yf
 # ====================== 1. 核心系統設定 ======================
 st.set_page_config(page_title="台股法人操盤工具", layout="wide")
 st.title("🟢 台股三大法人買超專業操盤系統")
-st.markdown("**20年操盤手設計**｜法人大單 + MA5 防護 + 集保籌碼監控")
+st.markdown("**20年操盤手設計**｜從 2026/01/01 開始完整補帳｜自動跳過休市日")
 
 DATA_FILE = "twse_institutional_db.parquet"
-START_DATE = datetime(2026, 4, 27).date()
+# 改為 1/1 開始補齊
+START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 
-# ====================== 2. 資料處理工具函數 ======================
+# ====================== 2. 2026 年休市行事曆設定 ======================
 def is_trading_day(d):
-    if d.weekday() >= 5 or d == datetime(2026, 5, 1).date():
+    # A. 週末不交易
+    if d.weekday() >= 5: return False
+    
+    # B. 2026 國定休市日清單
+    holidays = [
+        "2026-01-01", # 開國紀念日
+        "2026-02-12", "2026-02-13", # 農曆年前結算交割(無交易)
+        "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", # 春節
+        "2026-02-27", # 228 補假
+        "2026-04-03", # 兒童節補假
+        "2026-04-06", # 清明節補假
+        "2026-05-01", # 勞動節
+        "2026-06-19", # 端午節
+        "2026-09-25", # 中秋節
+        "2026-09-28", # 教師節
+        "2026-10-09", # 國慶日補假
+        "2026-10-26", # 光復節補假
+        "2026-12-25", # 行憲紀念日
+    ]
+    if d.strftime('%Y-%m-%d') in holidays:
         return False
     return True
 
@@ -32,16 +52,6 @@ def clean_number(x):
         return float(x)
     except:
         return 0.0
-
-@st.cache_data(ttl=86400) # 每24小時才重新抓一次，避免黑屏
-def get_latest_tdcc_data():
-    """自動從政府 API 抓取最新一週集保大戶數據"""
-    try:
-        url = "https://openapi.twse.com.tw/v1/investmentControl/TWT86U" # 範例 API
-        # 注意：實際集保數據龐大，這裡採用簡化邏輯，若無法連線則跳過
-        return pd.DataFrame() 
-    except:
-        return pd.DataFrame()
 
 def download_t86(date):
     if not is_trading_day(date): return None
@@ -63,34 +73,43 @@ def download_t86(date):
     except: return None
     return None
 
-# ====================== 3. 介面按鈕：更新資料庫 ======================
-if st.button("🔄 更新三大法人資料 (從 4/27 開始補帳)", type="primary"):
+# ====================== 3. 補帳按鈕邏輯 ======================
+if st.button("🔄 開始完整補帳 (從 1/1 起，跳過休市日)", type="primary"):
     db = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
-    last_date = pd.to_datetime(db['日期']).max().date() if not db.empty else START_DATE - timedelta(days=1)
-    target = last_date + timedelta(days=1)
+    
+    # 如果資料庫是空的，從 1/1 開始；否則從資料庫最後一天往後接
+    if db.empty:
+        target = START_DATE
+    else:
+        last_in_db = pd.to_datetime(db['日期']).max().date()
+        target = last_in_db + timedelta(days=1)
+        
     today = datetime.now().date()
     
-    with st.status("📥 數據補齊中...") as status:
+    with st.status("📥 正在補齊 2026 年度數據...") as status:
         while target <= today:
             if is_trading_day(target):
+                st.write(f"正在抓取 {target}...")
                 new_df = download_t86(target)
                 if new_df is not None:
                     db = pd.concat([db, new_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
                     db.to_parquet(DATA_FILE, index=False)
-                    st.write(f"✅ {target} 完成")
-                    time.sleep(random.uniform(5, 8))
-                else: break
+                    time.sleep(random.uniform(5, 8)) # 避免被證交所封鎖
+                else:
+                    # 如果當天是交易日但沒資料，可能是證交所尚未上傳或連線失敗
+                    st.warning(f"{target} 無法下載，暫停更新")
+                    break
             target += timedelta(days=1)
-        status.update(label="更新完成", state="complete")
+        status.update(label="年度補帳完成！", state="complete")
 
-# ====================== 4. 顯示報表 (先過濾再同步) ======================
+# ====================== 4. 報表顯示邏輯 ======================
 if os.path.exists(DATA_FILE):
     db = pd.read_parquet(DATA_FILE)
     if not db.empty:
         latest = pd.to_datetime(db['日期']).max().date()
-        st.success(f"📊 最新數據日期：{latest} | 總筆數：{len(db):,}")
+        st.success(f"📊 數據已補至：{latest} | 資料庫累積：{len(db):,}")
 
-        # 計算連買天數
+        # 計算連買
         db = db.sort_values(['證券代號', '日期']).copy()
         db['買超正'] = db['三大法人買賣超股數'] > 0
         db['連續買超'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
@@ -98,16 +117,14 @@ if os.path.exists(DATA_FILE):
         today_df = db[pd.to_datetime(db['日期']).dt.date == latest].copy()
         today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
 
-        # 核心過濾：先抓買超前 100 名，避免黑屏
+        # 法人篩選：買超 > 500 張
         pre_filter = today_df[today_df['買超張數'] >= 500].sort_values('買超張數', ascending=False).head(100)
 
         if not pre_filter.empty:
-            if st.button("🚀 同步價格與集保 (計算 Top 20 精選)", type="secondary"):
-                with st.spinner("🔍 正在計算 MA5 支撐與集保籌碼..."):
+            if st.button("🚀 同步價格與計算 Top 20", type="secondary"):
+                with st.spinner("🔍 正在同步最新現價..."):
                     codes = pre_filter['證券代號'].tolist()
                     tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
-                    
-                    # yfinance 批次同步
                     price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
                     
                     price_map = {}
@@ -125,26 +142,24 @@ if os.path.exists(DATA_FILE):
                     pre_filter['目前現價'] = pre_filter['證券代號'].map(lambda x: price_map.get(x, (np.nan, np.nan))[0])
                     pre_filter['5日均價'] = pre_filter['證券代號'].map(lambda x: price_map.get(x, (np.nan, np.nan))[1])
                     pre_filter['價差%'] = ((pre_filter['目前現價'] - pre_filter['5日均價']) / pre_filter['5日均價'] * 100).round(2)
-                    pre_filter['集保人數變動'] = "待更新" # 集保 API 整合中，先預留欄位
 
-                # 建立操盤建議權重
+                # 排序與操盤建議
                 cond1 = (pre_filter['買超張數'] > 1000) & (pre_filter['連續買超'] < 3)
                 cond2 = (pre_filter['連續買超'] >= 3)
                 pre_filter['操盤建議'] = np.select([cond1, cond2], ['🔥 雙強初現', '🔒 法人鎖碼'], default='✅ 值得觀察')
                 
-                # 最終排序與顯示
                 rank_map = {'🔥 雙強初現': 2, '🔒 法人鎖碼': 1, '✅ 值得觀察': 0}
                 pre_filter['rank'] = pre_filter['操盤建議'].map(rank_map)
                 final_df = pre_filter.dropna(subset=['目前現價']).sort_values(['rank', '買超張數'], ascending=False).head(20)
 
-                st.subheader("📊 操盤精選 Top 20")
+                st.subheader(f"📊 {latest} 操盤精選 Top 20")
                 st.dataframe(
-                    final_df[['日期', '證券代號', '證券名稱', '買超張數', '目前現價', '5日均價', '價差%', '連續買超', '集保人數變動', '操盤建議']],
+                    final_df[['證券代號', '證券名稱', '買超張數', '目前現價', '5日均價', '價差%', '連續買超', '操盤建議']],
                     use_container_width=True, hide_index=True,
                     column_config={"價差%": st.column_config.NumberColumn(format="%.2f %%")}
                 )
             else:
-                st.warning("請點擊上方按鈕開始分析這 100 檔標的。")
-                st.dataframe(pre_filter[['日期', '證券代號', '證券名稱', '買超張數', '連續買超']], use_container_width=True)
+                st.info("請點擊按鈕同步價格。")
+                st.dataframe(pre_filter[['證券代號', '證券名稱', '買超張數', '連續買超']], use_container_width=True)
 else:
-    st.info("請點擊更新按鈕同步數據。")
+    st.info("尚未有數據，請點擊上方按鈕開始從 1/1 補帳。")
