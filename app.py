@@ -13,7 +13,6 @@ import yfinance as yf
 # ====================== 1. 核心系統設定 ======================
 st.set_page_config(page_title="台股法人操盤工具", layout="wide")
 st.title("🟢 台股三大法人買超專業操盤系統")
-st.markdown("**專業操盤手設計**｜法人買超 + 真實 MA5 支撐防護")
 
 DATA_FILE = "twse_institutional_db.parquet"
 START_DATE = datetime(2026, 4, 27).date()
@@ -33,29 +32,23 @@ def clean_number(x):
     except:
         return 0.0
 
-# ====================== 3. 價格抓取模組 ======================
-@st.cache_data(ttl=3600)
-def get_prices_yf_stable(stock_codes):
-    prices = {}
-    if not stock_codes: return prices
-    tickers = [f"{s}.TW" for s in stock_codes] + [f"{s}.TWO" for s in stock_codes]
-    try:
-        data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False, threads=True)
-        for stock in stock_codes:
-            for suffix in [".TW", ".TWO"]:
-                t_str = f"{stock}{suffix}"
-                try:
-                    s_data = data[t_str] if (t_str in data.columns.levels[0]) else pd.DataFrame()
-                    if not s_data.empty:
-                        valid_closes = s_data['Close'].dropna()
-                        if not valid_closes.empty:
-                            curr_p = round(float(valid_closes.iloc[-1]), 2)
-                            ma5_p = round(float(valid_closes.tail(5).mean()), 2)
-                            prices[stock] = {'Close': curr_p, 'MA5': ma5_p}
-                            break 
-                except: continue
-    except: pass
-    return prices
+# ====================== 3. 價格抓取模組 (暴力同步版) ======================
+def get_single_price(stock_code):
+    """暴力嘗試所有後綴，確保抓到價格"""
+    for suffix in [".TW", ".TWO"]:
+        try:
+            ticker = f"{stock_code}{suffix}"
+            # 抓取 10 天資料以確保 MA5 準確
+            df = yf.download(ticker, period="10d", interval="1d", progress=False, show_errors=False)
+            if not df.empty:
+                valid_close = df['Close'].dropna()
+                if not valid_close.empty:
+                    curr_p = round(float(valid_close.iloc[-1]), 2)
+                    ma5_p = round(float(valid_close.tail(5).mean()), 2)
+                    return curr_p, ma5_p
+        except:
+            continue
+    return np.nan, np.nan
 
 # ====================== 4. 證交所資料抓取 ======================
 def download_t86(date):
@@ -70,83 +63,87 @@ def download_t86(date):
         df = pd.read_csv(StringIO("\n".join(lines[start_idx:])), encoding='big5', on_bad_lines='skip')
         df.columns = [str(col).strip().replace('\n','').replace(' ','') for col in df.columns]
         buy_col = next((col for col in df.columns if "三大法人買賣超股數" in col), None)
-        price_col = next((col for col in df.columns if "收盤價" in col), None)
         if buy_col and '證券代號' in df.columns:
             df['三大法人買賣超股數'] = df[buy_col].apply(clean_number)
-            df['收盤價'] = df[price_col].apply(clean_number) if price_col else 0.0
             df = df.dropna(subset=['證券代號']).copy()
             df['日期'] = date
+            # 修正代碼抓取邏輯
             df['證券代號'] = df['證券代號'].astype(str).str.strip().str.extract(r'(\d+)')[0]
-            return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數', '收盤價']]
+            return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']]
     except: return None
     return None
 
-# ====================== 5. 主程式邏輯 ======================
-if st.button("🔄 更新三大法人資料 (從 4/27 開始補帳)", type="primary"):
-    db = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
-    last_date = pd.to_datetime(db['日期']).max().date() if not db.empty else START_DATE - timedelta(days=1)
-    target = last_date + timedelta(days=1)
-    today = datetime.now().date()
-    with st.status("📥 數據補齊中...", expanded=True) as status:
-        while target <= today:
-            if is_trading_day(target):
-                st.write(f"正在抓取 {target}...")
-                new_df = download_t86(target)
-                if new_df is not None:
-                    db = pd.concat([db, new_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
-                    db.to_parquet(DATA_FILE, index=False)
-                    st.write(f"✅ {target} 完成")
-                    time.sleep(random.uniform(6, 9))
-                else:
-                    st.write(f"❌ {target} 請求失敗")
-                    break
-            target += timedelta(days=1)
-        status.update(label="數據更新完成", state="complete")
+# ====================== 5. 主程式按鈕 ======================
+col_up, col_reset = st.columns([1, 4])
+with col_up:
+    if st.button("🔄 更新三大法人資料", type="primary"):
+        db = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
+        last_date = pd.to_datetime(db['日期']).max().date() if not db.empty else START_DATE - timedelta(days=1)
+        target = last_date + timedelta(days=1)
+        today = datetime.now().date()
+        with st.status("📥 正在從證交所補帳...") as status:
+            while target <= today:
+                if is_trading_day(target):
+                    new_df = download_t86(target)
+                    if new_df is not None:
+                        db = pd.concat([db, new_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
+                        db.to_parquet(DATA_FILE, index=False)
+                        st.write(f"✅ {target} 數據已入庫")
+                        time.sleep(random.uniform(5, 7))
+                    else: break
+                target += timedelta(days=1)
+            status.update(label="證交所同步完成", state="complete")
+with col_reset:
+    if st.button("🗑️ 清空所有歷史資料 (出錯重抓用)"):
+        if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
+        st.rerun()
 
-# ====================== 6. 報表顯示 (已修復變數錯誤) ======================
+# ====================== 6. 報表顯示與價格強制同步 ======================
 if os.path.exists(DATA_FILE):
     db = pd.read_parquet(DATA_FILE)
     if not db.empty:
         latest = pd.to_datetime(db['日期']).max().date()
-        st.success(f"✅ 最新數據日期：**{latest}**")
+        st.success(f"📈 最新資料日期：{latest}")
+        
+        # 基礎計算
         db = db.sort_values(['證券代號', '日期']).copy()
         db['買超正'] = db['三大法人買賣超股數'] > 0
-        db['連續出現天數'] = db.groupby('證券代號')['買超正'].transform(
-            lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1)
-        )
-        today_data = db[pd.to_datetime(db['日期']).dt.date == latest].copy()
-        today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
+        db['連續買超'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
-        with st.spinner("🔍 正在計算真實 MA5 乖離率..."):
-            stock_list = today_data['證券代號'].tolist()
-            price_map = get_prices_yf_stable(stock_list)
-            today_data['目前現價'] = today_data['證券代號'].map(lambda x: price_map.get(x, {}).get('Close', np.nan))
-            today_data['5日均價'] = today_data['證券代號'].map(lambda x: price_map.get(x, {}).get('MA5', np.nan))
+        # 準備當日報表 (過濾買超 > 500張，但不刪除抓不到價格的行)
+        today_df = db[pd.to_datetime(db['日期']).dt.date == latest].copy()
+        today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
+        display_df = today_df[today_df['買超張數'] >= 500].sort_values('買超張數', ascending=False).head(100)
+        
+        if st.button("🚀 強制同步最新股價 (若表格價格為空，請點我)"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            # --- 修正名稱錯誤：確保 5日均價 前後統一 ---
-            today_data['價差%'] = ((today_data['目前現價'] - today_data['5日均價']) / today_data['5日均價'] * 100).round(2)
-            today_data = today_data.dropna(subset=['目前現價'])
-
-        cond1 = (today_data['買超張數'] > 1000) & (today_data['連續出現天數'] < 3)
-        cond2 = today_data['連續出現天數'] >= 3
-        today_data['操盤建議'] = np.select([cond1, cond2], ['🔥 雙強初現', '🔒 法人鎖碼'], default='✅ 值得觀察')
-        
-        final_df = today_data[today_data['買超張數'] > 500].copy()
-        st.subheader(f"📊 專業分析報表 (買超 > 500張)")
-        
-        st.dataframe(
-            final_df[['日期', '證券代號', '證券名稱', '買超張數', '5日均價', '目前現價', '價差%', '連續出現天數', '操盤建議']].sort_values('買超張數', ascending=False),
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "價差%": st.column_config.NumberColumn("價差%", format="%.2f %%"),
-                "買超張數": st.column_config.NumberColumn(format="%.1f 張"),
-                "目前現價": st.column_config.NumberColumn(format="%.2f"),
-                "5日均價": st.column_config.NumberColumn(format="%.2f"),
-                "連續出現天數": st.column_config.NumberColumn(format="%d 天")
-            }
-        )
-    else:
-        st.info("資料庫目前是空的，請點擊上方按鈕開始抓取。")
-else:
-    st.info("尚未偵測到資料庫檔案，請點擊按鈕更新。")
+            prices_list = []
+            ma5_list = []
+            
+            for i, row in enumerate(display_df.itertuples()):
+                status_text.text(f"正在抓取 {row.證券名稱}({row.證券代號}) 的價格...")
+                p, m = get_single_price(row.證券代號)
+                prices_list.append(p)
+                ma5_list.append(m)
+                progress_bar.progress((i + 1) / len(display_df))
+                time.sleep(0.2) # 微小延遲避免 Yahoo 封鎖
+            
+            display_df['目前現價'] = prices_list
+            display_df['5日均價'] = ma5_list
+            display_df['價差%'] = ((display_df['目前現價'] - display_df['5日均價']) / display_df['5日均價'] * 100).round(2)
+            status_text.success("價格同步完成！")
+            
+            # 顯示表格
+            st.dataframe(
+                display_df[['日期', '證券代號', '證券名稱', '買超張數', '目前現價', '5日均價', '價差%', '連續買超']],
+                use_container_width=True, hide_index=True,
+                column_config={"價差%": st.column_config.NumberColumn(format="%.2f %%")}
+            )
+        else:
+            st.warning("請點擊上方按鈕以載入即時股價數據。")
+            st.dataframe(
+                display_df[['日期', '證券代號', '證券名稱', '買超張數', '連續買超']],
+                use_container_width=True, hide_index=True
+            )
