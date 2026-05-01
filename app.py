@@ -62,8 +62,7 @@ def download_t86(date):
         df['證券代號'] = df['證券代號'].astype(str).str.strip().str.zfill(4)
         
         return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']]
-    except Exception as e:
-        st.error(f"{date} 下載失敗")
+    except:
         return None
 
 # ====================== 更新資料 ======================
@@ -73,7 +72,6 @@ if st.button("🔄 開始/繼續 更新資料（從2026-4-27開始）", type="pr
     else:
         db = pd.DataFrame(columns=['日期', '證券代號', '證券名稱', '三大法人買賣超股數'])
     
-    # 修正語法錯誤的地方
     if db.empty:
         last_date = START_DATE - timedelta(days=1)
     else:
@@ -102,11 +100,13 @@ if st.button("🔄 開始/繼續 更新資料（從2026-4-27開始）", type="pr
     
     st.success("更新完成！")
 
-# ====================== 產生專業分析表格 ======================
+# ====================== 專業分析表格 ======================
 if os.path.exists(DATA_FILE):
     db = pd.read_parquet(DATA_FILE)
     if not db.empty:
         latest = pd.to_datetime(db['日期']).max().date()
-        st.success(f"資料最新日期：**{latest}** | 總筆數：{len(db):,}")
+        st.success(f"✅ 資料最新日期：**{latest}** | 總筆數：{len(db):,}")
         
-        #
+        # 計算連續買超天數
+        db = db.sort_values(['證券代號', '日期'])
+        db['買超正'] = db['三大法人買
