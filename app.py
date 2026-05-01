@@ -21,13 +21,11 @@ USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 
 # ====================== 2. 資料處理工具 ======================
 def is_trading_day(d):
-    """判斷是否為交易日"""
     if d.weekday() >= 5 or d == datetime(2026, 5, 1).date():
         return False
     return True
 
 def clean_number(x):
-    """清除逗號並轉換數字"""
     if isinstance(x, str):
         x = re.sub(r'[^\d.-]', '', x)
     try:
@@ -38,7 +36,6 @@ def clean_number(x):
 # ====================== 3. 價格抓取模組 ======================
 @st.cache_data(ttl=3600)
 def get_prices_yf_stable(stock_codes):
-    """解決上市/上櫃後綴問題，抓取真實收盤價與 MA5"""
     prices = {}
     if not stock_codes: return prices
     tickers = [f"{s}.TW" for s in stock_codes] + [f"{s}.TWO" for s in stock_codes]
@@ -106,7 +103,7 @@ if st.button("🔄 更新三大法人資料 (從 4/27 開始補帳)", type="prim
             target += timedelta(days=1)
         status.update(label="數據更新完成", state="complete")
 
-# ====================== 6. 報表顯示 (優化顯示格式) ======================
+# ====================== 6. 報表顯示 (已修復變數錯誤) ======================
 if os.path.exists(DATA_FILE):
     db = pd.read_parquet(DATA_FILE)
     if not db.empty:
@@ -126,8 +123,8 @@ if os.path.exists(DATA_FILE):
             today_data['目前現價'] = today_data['證券代號'].map(lambda x: price_map.get(x, {}).get('Close', np.nan))
             today_data['5日均價'] = today_data['證券代號'].map(lambda x: price_map.get(x, {}).get('MA5', np.nan))
             
-            # 將數值保持為小數，透過 Streamlit Column Config 顯示為 %
-            today_data['價差%'] = ((today_data['目前現價'] - today_data['5日均價']) / today_data['5_日均價']).round(4)
+            # --- 修正名稱錯誤：確保 5日均價 前後統一 ---
+            today_data['價差%'] = ((today_data['目前現價'] - today_data['5日均價']) / today_data['5日均價'] * 100).round(2)
             today_data = today_data.dropna(subset=['目前現價'])
 
         cond1 = (today_data['買超張數'] > 1000) & (today_data['連續出現天數'] < 3)
@@ -137,24 +134,18 @@ if os.path.exists(DATA_FILE):
         final_df = today_data[today_data['買超張數'] > 500].copy()
         st.subheader(f"📊 專業分析報表 (買超 > 500張)")
         
-        # --- 關鍵修正：透過 column_config 讓價差顯示為百分比 ---
         st.dataframe(
             final_df[['日期', '證券代號', '證券名稱', '買超張數', '5日均價', '目前現價', '價差%', '連續出現天數', '操盤建議']].sort_values('買超張數', ascending=False),
             use_container_width=True, 
             hide_index=True,
             column_config={
-                "價差%": st.column_config.NumberColumn(
-                    "價差%",
-                    help="現價與5日均價的乖離率",
-                    format="%.2f%%"  # 這裡會自動將 0.0404 顯示為 4.04%
-                ),
+                "價差%": st.column_config.NumberColumn("價差%", format="%.2f %%"),
                 "買超張數": st.column_config.NumberColumn(format="%.1f 張"),
                 "目前現價": st.column_config.NumberColumn(format="%.2f"),
                 "5日均價": st.column_config.NumberColumn(format="%.2f"),
                 "連續出現天數": st.column_config.NumberColumn(format="%d 天")
             }
         )
-        st.info("💡 **小撇步**：點擊表格標題的『價差%』，可以將乖離率從小排到大，優先觀察回測 5 日線支撐的股票。")
     else:
         st.info("資料庫目前是空的，請點擊上方按鈕開始抓取。")
 else:
