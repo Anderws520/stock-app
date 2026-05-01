@@ -11,23 +11,54 @@ import os
 import yfinance as yf
 
 # ====================== 1. 核心系統設定 ======================
+# 設定初始側邊欄為收合狀態，解決手機版遮擋問題
 st.set_page_config(page_title="台股法人全功能操盤系統", layout="wide", initial_sidebar_state="collapsed")
 
 DATA_FILE = "twse_institutional_db.parquet"
 START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 
-# 側邊欄導覽 (設定選完後建議使用者手動點擊左上角 X，或將選單放在主畫面)
-with st.sidebar:
-    st.title("🛠️ 操盤工具箱")
-    mode = st.radio("功能切換後請關閉選單", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"])
-    st.markdown("---")
-    st.info("💡 **顯示優化**：戰報已整合『價差%』、『操盤建議』與『集保變動』。")
+# 自定義 CSS 讓頂部導覽按鈕更美觀
+st.markdown("""
+    <style>
+    div.stButton > button:first-child {
+        background-color: #1E1E1E;
+        color: white;
+        border-radius: 8px;
+        height: 3em;
+        font-weight: bold;
+        border: 1px solid #333;
+    }
+    div.stButton > button:active {
+        background-color: #2E7D32;
+        border: 1px solid #4CAF50;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 頂部導覽區 (取代側邊欄，解決無法自動縮回的問題) ---
+st.title("⚒️ 操盤工具箱")
+col_nav1, col_nav2, col_nav3 = st.columns(3)
+
+# 利用 Session State 紀錄目前分頁邏輯
+if "current_mode" not in st.session_state:
+    st.session_state.current_mode = "今日強勢戰報"
+
+with col_nav1:
+    if st.button("🟢 今日強勢戰報"):
+        st.session_state.current_mode = "今日強勢戰報"
+with col_nav2:
+    if st.button("🔍 籌碼週期分析"):
+        st.session_state.current_mode = "籌碼週期分析"
+with col_nav3:
+    if st.button("🗄️ 資料庫管理"):
+        st.session_state.current_mode = "資料庫管理"
+
+st.markdown("---")
 
 # ====================== 2. 通用核心函數 ======================
 def is_trading_day(d):
     if d.weekday() >= 5: return False
-    # 2026 節假日簡易判斷
     holidays = ["2026-01-01", "2026-01-28", "2026-02-27", "2026-04-03", "2026-04-06", "2026-05-01"]
     return d.strftime('%Y-%m-%d') not in holidays
 
@@ -57,14 +88,14 @@ def download_t86(date):
 
 # ====================== 3. 各分頁邏輯 ======================
 
-# --- 分頁 A: 今日強勢戰報 (完整欄位恢復版) ---
-if mode == "今日強勢戰報":
-    st.title("🟢 今日三大法人強勢戰報")
+# --- 分頁 A: 今日強勢戰報 ---
+if st.session_state.current_mode == "今日強勢戰報":
+    st.subheader("🟢 今日三大法人強勢戰報")
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
         if not db.empty:
             latest = pd.to_datetime(db['日期']).max().date()
-            st.success(f"📊 最新數據日期：{latest} | 總筆數：{len(db):,}")
+            st.info(f"📊 數據日期：{latest} | 總筆數：{len(db):,}") #
             
             db = db.sort_values(['證券代號', '日期']).copy()
             db['買超正'] = db['三大法人買賣超股數'] > 0
@@ -74,7 +105,7 @@ if mode == "今日強勢戰報":
             today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
             pre_filter = today_df[today_df['買超張數'] >= 500].sort_values('買超張數', ascending=False).head(100)
 
-            if st.button("🚀 同步今日價格與計算 Top 20", type="primary"):
+            if st.button("🚀 同步今日價格與計算 Top 20", type="primary"): #
                 with st.spinner("🔍 正在同步最新市場現價與操盤邏輯..."):
                     codes = pre_filter['證券代號'].tolist()
                     tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
@@ -89,8 +120,8 @@ if mode == "今日強勢戰報":
                                 if not p_df.empty:
                                     curr = round(float(p_df['Close'].iloc[-1]), 2)
                                     ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
-                                    vol_now = p_df['Volume'].iloc[-1]
-                                    vol_prev = p_df['Volume'].iloc[-2]
+                                    # 集保變動以成交量趨勢模擬
+                                    vol_change = "📉 減少" if p_df['Volume'].iloc[-1] < p_df['Volume'].iloc[-2] else "📈 增加"
                                     
                                     row = pre_filter[pre_filter['證券代號']==s].iloc[0]
                                     advice = "🚀 剛發動" if row['連續買超'] == 1 else "⏳ 持續鎖碼"
@@ -103,35 +134,34 @@ if mode == "今日強勢戰報":
                                         "5日均價": ma5,
                                         "價差%": ((curr - ma5) / ma5 * 100),
                                         "連續買超": int(row['連續買超']),
-                                        "集保變動": "📉 減少" if vol_now < vol_prev else "📈 增加",
+                                        "集保變動": vol_change,
                                         "操盤建議": advice
                                     })
                                     break
                     
                     final_df = pd.DataFrame(results).head(20)
-                    st.subheader(f"📊 {latest} 操盤精選 Top 20")
                     st.dataframe(
                         final_df, 
                         use_container_width=True, 
                         hide_index=True,
                         column_config={
-                            "價差%": st.column_config.NumberColumn("價差%", format="%.2f%%"),
+                            "價差%": st.column_config.NumberColumn("價差%", format="%.2f %%"), #
                             "操盤建議": st.column_config.TextColumn("操盤建議")
                         }
                     )
     else:
-        st.warning("請先前往『資料庫管理』進行補帳。")
+        st.warning("請先切換至『資料庫管理』進行補帳。")
 
 # --- 分頁 B: 籌碼週期分析 ---
-elif mode == "籌碼週期分析":
-    st.title("🔍 1/1 至今：最佳進出場深度分析")
+elif st.session_state.current_mode == "籌碼週期分析":
+    st.subheader("🔍 1/1 至今：法人籌碼週期分析") #
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE).sort_values(['證券代號', '日期'])
         db['買超張數'] = (db['三大法人買賣超股數'] / 1000).round(1)
         db['買超正'] = db['買超張數'] > 100
         db['連買計數'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
-        if st.button("📊 啟動全年度週期與價位掃描", type="primary"):
+        if st.button("📊 啟動全年度籌碼慣性掃描", type="primary"): #
             active_stocks = db[db['連買計數'] >= 3]['證券代號'].unique()
             results = []
             with st.status("分析中...") as status:
@@ -153,19 +183,18 @@ elif mode == "籌碼週期分析":
                         last_c = s_data.iloc[-1]['連買計數']
                         results.append({
                             "代號": code, "名稱": s_data['證券名稱'].iloc[0],
-                            "歷史發動次數": f"{len(entry_points)} 次",
+                            "歷史發動": f"{len(entry_points)} 次",
                             "今日狀態": "🟢 剛發動" if last_c == 1 else f"⚪ 連買 {int(last_c)} 天",
                             "最佳購買日期": "🔥 就在今天" if last_c == 1 else "⏳ 等待回測",
-                            "最佳購買價位": curr_p if last_c == 1 else ma5,
                             "最近發動": " → ".join([d.strftime('%m/%d') for d in entry_points[-3:]])
                         })
-                status.update(label="全年度量價分析完成！", state="complete")
+                status.update(label="分析完成！", state="complete")
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
 # --- 分頁 C: 資料庫管理 ---
-elif mode == "資料庫管理":
-    st.title("🗄️ 法人籌碼資料庫管理")
-    if st.button("🧨 重置並重新補帳 (從 1/1 開始)", type="primary"):
+elif st.session_state.current_mode == "資料庫管理":
+    st.subheader("🗄️ 法人籌碼資料庫管理")
+    if st.button("🧨 重置並重新補帳 (從 1/1 開始)", type="primary"): #
         if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
         all_data = []
         progress_bar = st.progress(0)
