@@ -16,13 +16,12 @@ st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial
 DATA_FILE = "twse_institutional_db.parquet"
 START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
-ADMIN_PASSWORD = "1023520"  # 已更新密碼
+ADMIN_PASSWORD = "1023520"  # 您的自訂密碼
 
 # --- 側邊欄：功能選單與安全鎖 ---
 with st.sidebar:
     st.title("⚒️ 操盤工具箱") #
     
-    # 全部功能回歸側邊欄
     mode = st.radio(
         "功能切換",
         ["今日強勢戰報", "籌碼週期分析", "資料庫管理"],
@@ -31,16 +30,21 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # 資料庫管理安全機制
     if mode == "資料庫管理":
         st.subheader("🔐 安全鎖定")
-        pwd_input = st.text_input("請輸入管理密碼以執行重置", type="password")
+        pwd_input = st.text_input("請輸入管理密碼", type="password")
+        
         if pwd_input == ADMIN_PASSWORD:
-            st.success("身分驗證成功")
-            if st.button("🧨 確認刪除並重新抓取資料 (1/1開始)", type="primary"):
-                st.session_state.do_update = True
+            st.success("✅ 密碼正確")
+            # --- 二次確認機制 ---
+            st.warning("⚠️ 警告：重置將刪除所有歷史存檔。")
+            confirm_delete = st.checkbox("我確定要刪除目前的歷史資料") #
+            
+            if confirm_delete:
+                if st.button("🧨 執行重置並重新補帳", type="primary"):
+                    st.session_state.do_update = True
         elif pwd_input != "":
-            st.error("密碼錯誤")
+            st.error("❌ 密碼錯誤")
 
 # ====================== 2. 通用核心函數 ======================
 def is_trading_day(d):
@@ -76,13 +80,12 @@ def download_t86(date):
 
 st.header(f"📈 {mode}")
 
-# --- 分頁 A: 今日強勢戰報 ---
 if mode == "今日強勢戰報":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
         if not db.empty:
             latest = pd.to_datetime(db['日期']).max().date()
-            st.info(f"📊 最新成交日期：{latest} | 資料庫筆數：{len(db):,}") #
+            st.info(f"📊 數據日期：{latest} | 總筆數：{len(db):,}") #
             
             db = db.sort_values(['證券代號', '日期']).copy()
             db['買超正'] = db['三大法人買賣超股數'] > 0
@@ -92,7 +95,7 @@ if mode == "今日強勢戰報":
             today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
             pre_filter = today_df[today_df['買超張數'] >= 500].sort_values('買超張數', ascending=False).head(100)
 
-            if st.button("🚀 執行法人同步與操盤計算", type="primary"): #
+            if st.button("🚀 啟動同步與操盤分析", type="primary"): #
                 with st.spinner("同步市場即時價格中..."):
                     codes = pre_filter['證券代號'].tolist()
                     tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
@@ -107,11 +110,10 @@ if mode == "今日強勢戰報":
                                 if not p_df.empty:
                                     curr = round(float(p_df['Close'].iloc[-1]), 2)
                                     ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
-                                    # 集保與買超趨勢模擬
-                                    vol_change = "📉 籌碼分散" if p_df['Volume'].iloc[-1] < p_df['Volume'].iloc[-2] else "📈 籌碼集中"
+                                    vol_change = "📉 籌碼分散" if p_df['Volume'].iloc[-1] < p_df['Volume'].iloc[-2] else "📈 籌碼集中" #
                                     
                                     row = pre_filter[pre_filter['證券代號']==s].iloc[0]
-                                    advice = "🚀 第一天發動" if row['連續買超'] == 1 else "⏳ 高檔橫盤中"
+                                    advice = "🚀 第一天發動" if row['連續買超'] == 1 else "⏳ 籌碼鎖定中"
                                     
                                     results.append({
                                         "證券代號": s, "證券名稱": row['證券名稱'], "買超張數": row['買超張數'],
@@ -124,19 +126,18 @@ if mode == "今日強勢戰報":
                     st.dataframe(pd.DataFrame(results).head(20), use_container_width=True, hide_index=True,
                                  column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
     else:
-        st.warning("資料庫尚無數據，請先至『資料庫管理』更新。")
+        st.warning("請先由側邊欄進入『資料庫管理』完成補帳。")
 
-# --- 分頁 B: 籌碼週期分析 ---
 elif mode == "籌碼週期分析":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE).sort_values(['證券代號', '日期'])
         db['買超正'] = db['三大法人買賣超股數'] > 100000 
         db['連買計數'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
-        if st.button("📊 啟動全年度規律掃描", type="primary"): #
+        if st.button("📊 啟動全年度慣性掃描", type="primary"): #
             active_stocks = db[db['連買計數'] >= 3]['證券代號'].unique()
             results = []
-            with st.status("進行深度週期計算...") as status:
+            with st.status("進行深度週期分析...") as status:
                 codes = active_stocks[:40].tolist()
                 tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
                 price_data = yf.download(tickers, period="12d", interval="1d", group_by='ticker', progress=False)
@@ -160,7 +161,7 @@ elif mode == "籌碼週期分析":
                 status.update(label="週期掃描完成！", state="complete")
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
-# --- 背景資料庫重置邏輯 ---
+# --- 背景重置邏輯 ---
 if "do_update" in st.session_state and st.session_state.do_update:
     if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
     all_data = []
@@ -168,7 +169,7 @@ if "do_update" in st.session_state and st.session_state.do_update:
     status_text = st.empty()
     target_dates = [d for d in (START_DATE + timedelta(n) for n in range((datetime.now().date() - START_DATE).days + 1)) if is_trading_day(d)]
     for i, d in enumerate(target_dates):
-        status_text.text(f"數據下載中... {d} ({i+1}/{len(target_dates)})")
+        status_text.text(f"補帳中... {d} ({i+1}/{len(target_dates)})")
         df = download_t86(d)
         if df is not None: all_data.append(df)
         progress_bar.progress((i + 1) / len(target_dates))
