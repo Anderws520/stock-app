@@ -1,57 +1,105 @@
-def download_t86(date: datetime.date):
-    """下載三大法人 T86（已強制處理 SSL + 詳細除錯）"""
-    if not is_trading_day(date):
+import streamlit as st
+import pandas as pd
+import requests
+import random
+import time
+from datetime import datetime, timedelta
+from io import StringIO
+import re
+
+st.set_page_config(page_title="台股法人除錯工具", layout="wide")
+st.title("🛠️ 台股三大法人抓取 - 除錯專用版")
+st.markdown("**專門解決黑屏與 SSL 問題**")
+
+# 配置
+DATA_FILE = "twse_institutional_db.parquet"
+START_DATE = datetime(2026, 4, 27).date()
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+]
+
+def is_trading_day(d):
+    if d.weekday() >= 5:
+        return False
+    if d == datetime(2026, 5, 1).date():
+        return False
+    return True
+
+def get_url(date):
+    return f"https://www.twse.com.tw/fund/T86?response=csv&date={date.strftime('%Y%m%d')}&selectType=ALLBUT0999"
+
+def clean_number(x):
+    if isinstance(x, str):
+        x = re.sub(r'[^\d.-]', '', x)
+    try:
+        return float(x)
+    except:
         return None
 
-    url = get_t86_url(date)
+# ==================== 主測試函數 ====================
+def test_download_one_day(test_date):
+    url = get_url(test_date)
     headers = {"User-Agent": random.choice(USER_AGENTS)}
-
+    
+    st.info(f"正在測試 {test_date} ...")
+    st.caption(f"URL: {url}")
+    
     try:
-        # 關鍵修正：強制關閉 SSL 驗證 + 增加超時
+        # 強制關閉 SSL 驗證 + 較長 timeout
         resp = requests.get(url, headers=headers, timeout=30, verify=False)
-        resp.raise_for_status()
+        st.success(f"HTTP 狀態碼: {resp.status_code}")
         
-        text = resp.text[:2000]  # 只取前面避免太長
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-
+        if resp.status_code != 200:
+            st.error(f"狀態碼錯誤: {resp.status_code}")
+            return None
+            
+        text = resp.text
+        st.caption(f"回應內容長度: {len(text)} 字元")
+        
+        # 顯示前 500 字元幫助除錯
+        st.text_area("回應內容前500字元", text[:500], height=150)
+        
         # 找資料起始行
+        lines = text.splitlines()
         start_idx = None
         for i, line in enumerate(lines):
-            if "證券代號" in line or "证券代號" in line:
+            if "證券代號" in line:
                 start_idx = i
                 break
-
+                
         if start_idx is None:
-            st.warning(f"{date} 無法找到『證券代號』，可能格式又變了")
-            st.text_area(f"{date} 原始內容預覽", text[:800], height=150)
+            st.error("找不到『證券代號』這行文字")
             return None
-
-        csv_content = "\n".join(lines[start_idx:])
-        df = pd.read_csv(StringIO(csv_content), encoding='big5', on_bad_lines='skip')
-
-        # 清理欄位
-        df.columns = [str(col).strip().replace('\n', '').replace(' ', '') for col in df.columns]
-
-        st.caption(f"[{date}] 成功抓到欄位: {list(df.columns)[:12]}")
-
-        # 找買賣超欄位
-        buy_col = None
-        for name in ['三大法人買賣超股數', '三大法人買賣超', '買賣超股數']:
-            if name in df.columns:
-                buy_col = name
-                break
-
-        if not buy_col or '證券代號' not in df.columns:
-            st.error(f"{date} 缺少關鍵欄位")
-            return None
-
-        df['三大法人買賣超股數'] = df[buy_col].apply(clean_number)
-        df = df.dropna(subset=['證券代號', '三大法人買賣超股數']).copy()
-        df['日期'] = pd.to_datetime(date).date()
-        df['證券代號'] = df['證券代號'].astype(str).str.strip().str.zfill(4)
-
-        return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']]
-
+            
+        csv_text = "\n".join(lines[start_idx:])
+        df = pd.read_csv(StringIO(csv_text), encoding='big5', on_bad_lines='skip')
+        
+        df.columns = [str(col).strip().replace('\n','').replace(' ','') for col in df.columns]
+        
+        st.success(f"✅ 成功解析！抓到 {len(df)} 筆資料")
+        st.write("欄位名稱：", list(df.columns))
+        
+        return df
+        
     except Exception as e:
-        st.error(f"{date} 下載失敗: {type(e).__name__} - {str(e)[:150]}")
+        st.error(f"❌ 發生錯誤: {type(e).__name__}")
+        st.error(str(e))
         return None
+
+# ====================== UI ======================
+st.subheader("單日測試（推薦先測今天）")
+
+col1, col2 = st.columns(2)
+with col1:
+    test_date = st.date_input("選擇測試日期", value=datetime.now().date())
+with col2:
+    if st.button("🚀 測試單日抓取", type="primary"):
+        with st.spinner("正在連線證交所..."):
+            result = test_download_one_day(test_date)
+
+st.markdown("---")
+if st.button("開始完整更新資料（從2026-4-27開始）"):
+    st.warning("請先確認單日測試成功後再執行完整更新，避免再次黑屏")
+
+st.caption("如果還是黑屏，請把終端機（命令提示字元）中顯示的錯誤完整複製貼給我。")
