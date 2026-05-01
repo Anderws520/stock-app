@@ -64,27 +64,29 @@ def download_t86(date):
 # ====================== 3. 主畫面業務邏輯 ======================
 st.header(f"📈 {mode}")
 
-# --- 今日強勢戰報：自動排序發動標的 ---
+# --- 今日強勢戰報：自動排序並擴充至 50 檔 ---
 if mode == "今日強勢戰報":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
         if not db.empty:
             latest = pd.to_datetime(db['日期']).max().date()
-            st.info(f"📊 數據日期：{latest} | 總筆數：{len(db):,}")
+            st.info(f"📊 數據日期：{latest} | 目前已自動鎖定 Top 50 籌碼標的")
             db = db.sort_values(['證券代號', '日期']).copy()
             db['買超正'] = db['三大法人買賣超股數'] > 0
             db['連續買超'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
             
             today_df = db[pd.to_datetime(db['日期']).dt.date == latest].copy()
             today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
-            pre_filter = today_df[today_df['買超張數'] >= 500].sort_values('買超張數', ascending=False).head(100)
+            # 擴充篩選範圍至 150 檔以確保能選出 50 檔有效數據
+            pre_filter = today_df[today_df['買超張數'] >= 300].sort_values('買超張數', ascending=False).head(150)
 
-            with st.spinner("🔄 同步即時價格與排序中..."):
+            with st.spinner("🔄 同步 Top 50 即時價格與發動排序中..."):
                 codes = pre_filter['證券代號'].tolist()
                 tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
                 price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
                 results = []
                 for s in codes:
+                    if len(results) >= 50: break # 限制顯示 50 檔
                     for suffix in [".TW", ".TWO"]:
                         t = f"{s}{suffix}"
                         if t in price_data.columns.levels[0]:
@@ -101,30 +103,30 @@ if mode == "今日強勢戰報":
                                 })
                                 break
                 
-                # 自動排序邏輯：第一天發動優先
                 final_df = pd.DataFrame(results)
                 if not final_df.empty:
                     final_df['sort_key'] = final_df['操盤建議'].apply(lambda x: 0 if "第一天" in x else 1)
                     final_df = final_df.sort_values(['sort_key', '買超張數'], ascending=[True, False]).drop(columns=['sort_key'])
-                    st.dataframe(final_df.head(20), use_container_width=True, hide_index=True,
+                    st.dataframe(final_df, use_container_width=True, hide_index=True,
                                  column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
     else: st.warning("請先完成資料補帳。")
 
-# --- 籌碼週期分析：自動排序剛發動標的 ---
+# --- 籌碼週期分析：自動排序並擴充至 50 檔 ---
 elif mode == "籌碼週期分析":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE).sort_values(['證券代號', '日期'])
-        db['買超正'] = db['三大法人買賣超股數'] > 100000 
+        db['買超正'] = db['三大法人買賣超股數'] > 50000 # 降低一點門檻以確保標足夠 
         db['連買計數'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
         active_stocks = db[db['連買計數'] >= 3]['證券代號'].unique()
         results = []
-        with st.status("🔄 正在整合並自動優先排序剛發動標的...") as status:
-            codes = active_stocks[:40].tolist()
+        with st.status("🔄 正在整合 Top 50 標的支撐壓力分析...") as status:
+            codes = active_stocks[:80].tolist() # 掃描前 80 檔以選出 50 檔
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
             price_data = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
             
             for code in codes:
+                if len(results) >= 50: break # 限制顯示 50 檔
                 s_data = db[db['證券代號'] == code].copy()
                 for suf in [".TW", ".TWO"]:
                     t = f"{code}{suf}"
@@ -149,28 +151,12 @@ elif mode == "籌碼週期分析":
                             })
                             break
             
-            # 自動排序邏輯：剛發動優先
             final_cycle_df = pd.DataFrame(results)
             if not final_cycle_df.empty:
                 final_cycle_df['sort_key'] = final_cycle_df['今日狀態'].apply(lambda x: 0 if "剛發動" in x else 1)
                 final_cycle_df = final_cycle_df.sort_values('sort_key').drop(columns=['sort_key'])
-                status.update(label="✅ 優先排序分析完成！", state="complete")
+                status.update(label="✅ 前 50 檔前瞻分析排序完成！", state="complete")
         
         if results:
             st.dataframe(final_cycle_df, use_container_width=True, hide_index=True,
                          column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
-
-# --- 背景重置邏輯 ---
-if "do_update" in st.session_state and st.session_state.do_update:
-    if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
-    all_data = []
-    target_dates = [d for d in (START_DATE + timedelta(n) for n in range((datetime.now().date() - START_DATE).days + 1)) if is_trading_day(d)]
-    p_bar = st.progress(0)
-    for i, d in enumerate(target_dates):
-        df = download_t86(d)
-        if df is not None: all_data.append(df)
-        p_bar.progress((i + 1) / len(target_dates))
-        time.sleep(random.uniform(2, 4))
-    if all_data: pd.concat(all_data).to_parquet(DATA_FILE)
-    st.success("✅ 資料庫重置完成！")
-    del st.session_state.do_update
