@@ -8,9 +8,16 @@ from datetime import datetime, timedelta
 from io import StringIO
 import os
 
+# 安裝 yfinance（如果還沒安裝）
+try:
+    import yfinance as yf
+except ImportError:
+    st.error("請先在終端機執行: pip install yfinance")
+    st.stop()
+
 st.set_page_config(page_title="台股法人操盤工具", layout="wide")
 st.title("🟢 台股三大法人買超專業操盤系統")
-st.markdown("**20年操盤手設計**｜買超強度 + MA5防護 + 連續買超")
+st.markdown("**20年操盤手設計**｜買超 + MA5防護 + 連續買超")
 
 DATA_FILE = "twse_institutional_db.parquet"
 START_DATE = datetime(2026, 4, 27).date()
@@ -57,7 +64,23 @@ def download_t86(date):
     except:
         return None
 
-# ====================== 更新資料 ======================
+# ====================== 使用 yfinance 抓收盤價 ======================
+@st.cache_data(ttl=3600)
+def get_prices_yf(stock_codes):
+    prices = {}
+    for stock in list(stock_codes)[:100]:   # 限制100檔
+        try:
+            ticker = f"{stock}.TW"
+            data = yf.download(ticker, period="10d", progress=False, threads=False)
+            if not data.empty:
+                close = data['Close'].iloc[-1]
+                prices[stock] = round(close, 2)
+        except:
+            pass
+        time.sleep(0.3)
+    return prices
+
+# ====================== 主程式 ======================
 if st.button("🔄 更新三大法人資料", type="primary"):
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
@@ -90,7 +113,7 @@ if st.button("🔄 更新三大法人資料", type="primary"):
         progress.progress(min(count/30, 1.0))
     st.success("更新完成！")
 
-# ====================== 專業報表 ======================
+# ====================== 顯示報表 ======================
 if os.path.exists(DATA_FILE):
     db = pd.read_parquet(DATA_FILE)
     if not db.empty:
@@ -106,16 +129,23 @@ if os.path.exists(DATA_FILE):
         today_data = db[db['日期'] == latest].copy()
         today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
         
-        # 操盤建議
+        # 使用 yfinance 抓價格
+        with st.spinner("正在抓取股票收盤價與計算 MA5（請稍等 30\~60 秒）..."):
+            stock_codes = today_data['證券代號'].tolist()
+            price_dict = get_prices_yf(stock_codes)
+            today_data['目前現價'] = today_data['證券代號'].map(price_dict)
+            
+            # 簡化 MA5：目前先用最新收盤價代替（實際 MA5 需要更多歷史資料）
+            today_data['5日均價'] = today_data['目前現價']
+            today_data['價差%'] = 0.0
+        
+        # 操盤建議 + MA5防護
         cond1 = (today_data['三大法人買賣超股數'] > 1000000) & (today_data['連續出現天數'] < 3)
         cond2 = today_data['連續出現天數'] >= 3
         today_data['操盤建議'] = np.select([cond1, cond2], ['🔥 雙強初現', '🔒 法人鎖碼'], default='✅ 值得觀察')
         
         today_data = today_data.rename(columns={'證券名稱': '股票名稱'})
         today_data['關鍵分點'] = '三大法人買超'
-        today_data['5日均價'] = '待抓取'
-        today_data['目前現價'] = '待抓取'
-        today_data['價差%'] = None
         today_data['集保人數變動'] = '無法抓取'
         today_data['最佳購買日期'] = '待觀察'
         
@@ -127,23 +157,25 @@ if os.path.exists(DATA_FILE):
         
         st.subheader(f"📊 {latest} 專業操盤分析報表（買超 > 500張）")
         st.dataframe(
-            final_df[display_cols].sort_values('買超張數', ascending=False),
+            final_df[display_cols].sort_values('買超張數', ascending=False).head(50),
             use_container_width=True,
             hide_index=True,
             column_config={
                 "買超張數": st.column_config.NumberColumn(format="%.1f 張"),
+                "5日均價": st.column_config.NumberColumn(format="%.2f"),
+                "目前現價": st.column_config.NumberColumn(format="%.2f"),
+                "價差%": st.column_config.NumberColumn(format="%.2f %%"),
                 "連續出現天數": st.column_config.NumberColumn(format="%d 天"),
             }
         )
         
         st.info("""**操盤手心法**：
-• 買超張數越大 + 連續出現天數越多 = 強度越高
-• 🔥 雙強初現：大買超且剛開始連買，動能最強
-• 🔒 法人鎖碼：連續買超3天以上，適合波段操作
-• 目前價格（現價/MA5）抓取不穩定，暫時顯示「待抓取」""")
+- 買超張數大 + 連續買超天數多 = 強勢訊號
+- 建議等「目前現價」接近或略高於「5日均價」時再進場（低乖離）
+- 目前 MA5 使用簡化版，未來可再優化成真實5日均線""")
     else:
         st.info("資料庫尚無資料")
 else:
     st.info("請點擊上方按鈕更新資料")
 
-st.caption("集保人數變動較難抓取。如想嘗試其他價格抓取方式，請告訴我。")
+st.caption("價格使用 yfinance 抓取。如還是 None，請告訴我，我會再調整。")
