@@ -12,14 +12,17 @@ import yfinance as yf
 
 # ====================== 1. 核心系統設定 ======================
 st.set_page_config(page_title="台股法人週期操盤系統", layout="wide")
+
 DATA_FILE = "twse_institutional_db.parquet"
 START_DATE = datetime(2026, 1, 1).date()
 
-# 側邊欄導覽
-st.sidebar.title("🛠️ 操盤工具箱")
-mode = st.sidebar.selectbox("切換功能分頁", ["今日強勢戰報", "籌碼週期分析"])
+# 強制顯示側邊欄選單
+with st.sidebar:
+    st.title("🛠️ 操盤工具箱")
+    mode = st.selectbox("功能分頁切換", ["今日強勢戰報", "籌碼週期分析"])
+    st.info("💡 週期分析會掃描 1/1 至今的所有歷史規律。")
 
-# ====================== 2. 核心函數 (保持不變) ======================
+# ====================== 2. 核心函數庫 ======================
 def is_trading_day(d):
     if d.weekday() >= 5: return False
     holidays = ["2026-01-01", "2026-02-12", "2026-02-13", "2026-02-16", "2026-02-17", "2026-02-18", "2026-02-19", "2026-02-20", "2026-02-27", "2026-04-03", "2026-04-06", "2026-05-01", "2026-06-19", "2026-09-25", "2026-09-28", "2026-10-09", "2026-10-26", "2026-12-25"]
@@ -30,66 +33,103 @@ def clean_number(x):
     try: return float(x)
     except: return 0.0
 
-# ====================== 3. 分頁邏輯 A: 今日強勢戰報 ======================
+# ====================== 3. 分頁邏輯 A: 今日強勢戰報 (恢復原本功能) ======================
 if mode == "今日強勢戰報":
     st.title("🟢 今日三大法人強勢戰報")
-    # (此處保留你原本的今日過濾與同步價格代碼，為節省長度，重點放在下方分頁)
+    
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
-        latest = pd.to_datetime(db['日期']).max().date()
-        st.success(f"📊 最新數據：{latest} | 總筆數：{len(db):,}")
-        
-        # 顯示你原本的 Top 20 邏輯...
-        # [此處省略與先前一致的今日 Top 20 代碼]
-        st.info("請點擊同步按鈕查看今日 Top 20。")
+        if not db.empty:
+            latest = pd.to_datetime(db['日期']).max().date()
+            st.success(f"📊 最新數據：{latest} | 總筆數：{len(db):,}")
 
-# ====================== 4. 分頁邏輯 B: 籌碼週期分析 (新功能) ======================
+            # 計算連買
+            db = db.sort_values(['證券代號', '日期']).copy()
+            db['買超正'] = db['三大法人買賣超股數'] > 0
+            db['連續買超'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+            
+            today_df = db[pd.to_datetime(db['日期']).dt.date == latest].copy()
+            today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
+
+            # 法人篩選門檻
+            pre_filter = today_df[today_df['買超張數'] >= 500].sort_values('買超張數', ascending=False).head(100)
+
+            if not pre_filter.empty:
+                if st.button("🚀 同步價格與計算 Top 20", type="primary"):
+                    with st.spinner("🔍 正在同步最新現價與 MA5..."):
+                        codes = pre_filter['證券代號'].tolist()
+                        tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
+                        price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
+                        
+                        price_map = {}
+                        for s in codes:
+                            for suffix in [".TW", ".TWO"]:
+                                t = f"{s}{suffix}"
+                                if t in price_data.columns.levels[0]:
+                                    s_df = price_data[t].dropna()
+                                    if not s_df.empty:
+                                        curr = round(float(s_df['Close'].iloc[-1]), 2)
+                                        ma5 = round(float(s_df['Close'].tail(5).mean()), 2)
+                                        price_map[s] = (curr, ma5)
+                                        break
+                        
+                        pre_filter['目前現價'] = pre_filter['證券代號'].map(lambda x: price_map.get(x, (np.nan, np.nan))[0])
+                        pre_filter['5日均價'] = pre_filter['證券代號'].map(lambda x: price_map.get(x, (np.nan, np.nan))[1])
+                        pre_filter['價差%'] = ((pre_filter['目前現價'] - pre_filter['5日均價']) / pre_filter['5日均價'] * 100).round(2)
+
+                    # 操盤邏輯建議
+                    cond1 = (pre_filter['買超張數'] > 1000) & (pre_filter['連續買超'] < 3)
+                    cond2 = (pre_filter['連續買超'] >= 3)
+                    pre_filter['操盤建議'] = np.select([cond1, cond2], ['🔥 雙強初現', '🔒 法人鎖碼'], default='✅ 值得觀察')
+                    
+                    rank_map = {'🔥 雙強初現': 2, '🔒 法人鎖碼': 1, '✅ 值得觀察': 0}
+                    pre_filter['rank'] = pre_filter['操盤建議'].map(rank_map)
+                    final_df = pre_filter.dropna(subset=['目前現價']).sort_values(['rank', '買超張數'], ascending=False).head(20)
+
+                    st.subheader(f"📊 {latest} 操盤精選 Top 20")
+                    st.dataframe(
+                        final_df[['證券代號', '證券名稱', '買超張數', '目前現價', '5日均價', '價差%', '連續買超', '操盤建議']],
+                        use_container_width=True, hide_index=True,
+                        column_config={"價差%": st.column_config.NumberColumn(format="%.2f %%")}
+                    )
+                else:
+                    st.info("請點擊下方按鈕同步今日 Top 20 價格。")
+                    st.dataframe(pre_filter[['證券代號', '證券名稱', '買超張數', '連續買超']], use_container_width=True)
+    else:
+        st.warning("找不到資料庫，請先執行補帳程序。")
+
+# ====================== 4. 分頁邏輯 B: 籌碼週期分析 ======================
 elif mode == "籌碼週期分析":
     st.title("🔍 1/1 至今：法人籌碼週期與進場點分析")
-    st.markdown("系統自動掃描 9 萬筆數據，尋找**法人有節奏操作**的標的。")
-
+    
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE).sort_values(['證券代號', '日期'])
-        
-        # 1. 找出有週期的標的：在一段時間內至少有兩次「法人連續買超」的動作
-        # 我們定義「週期性」：1-4月間，出現至少 2 次「連續 3 天以上大買」
         db['買超張數'] = (db['三大法人買賣超股數'] / 1000).round(1)
-        db['買超正'] = db['買超張數'] > 100 # 以 100 張為門檻
+        db['買超正'] = db['買超張數'] > 100
         
-        # 計算連買天數
-        db['連買次數'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+        # 計算連買次數與波段
+        db['連買計數'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
-        # 篩選出曾經有過 5 天以上連買的股票
-        cycle_stocks = db[db['連買次數'] >= 5]['證券代號'].unique()
-        
-        if st.button("📊 開始掃描週期性起伏標的"):
-            analysis_results = []
-            with st.spinner("正在分析 1/1 至今的進場點..."):
-                for code in cycle_stocks[:50]: # 先分析前 50 檔避免過久
+        if st.button("📊 啟動全年度籌碼週期掃描"):
+            cycle_stocks = db[db['連買計數'] >= 3]['證券代號'].unique() # 至少連買3次才算活躍
+            results = []
+            
+            with st.status("正在分析歷史規律...") as status:
+                for code in cycle_stocks:
                     s_data = db[db['證券代號'] == code].copy()
-                    name = s_data['證券名稱'].iloc[0]
-                    
-                    # 找出「最佳買進日」：連買剛開始的第一天 (連買次數 == 1)
-                    buy_dates = s_data[s_data['連買次數'] == 1]['日期'].tolist()
-                    buy_dates_str = [d.strftime('%m/%d') for d in buy_dates[-3:]] # 取最近三次
-                    
-                    # 計算近期法人力道 (最近 10 天總買超)
-                    recent_force = s_data.tail(10)['買超張數'].sum()
-                    
-                    analysis_results.append({
-                        "代號": code,
-                        "名稱": name,
-                        "週期活躍度": f"{len(buy_dates)} 波段",
-                        "歷史最佳買點 (近期)": " → ".join(buy_dates_str),
-                        "最近10日累計買超": recent_force,
-                        "目前狀態": "🟢 買訊出現" if s_data.iloc[-1]['連買次數'] == 1 else "⚪ 觀察中"
-                    })
+                    # 找出每一波連買的第一天 (即最佳買進日)
+                    entry_points = s_data[s_data['連買計數'] == 1]['日期'].tolist()
+                    if len(entry_points) >= 2: # 至少有兩次波段才叫週期標的
+                        recent_dates = [d.strftime('%m/%d') for d in entry_points[-3:]]
+                        results.append({
+                            "代號": code,
+                            "名稱": s_data['證券名稱'].iloc[0],
+                            "歷史發動次數": len(entry_points),
+                            "最近發動日期": " → ".join(recent_dates),
+                            "今日狀態": "🟢 今日剛發動" if s_data.iloc[-1]['連買計數'] == 1 else "⚪ 盤整/觀察",
+                            "最近10日累計": s_data.tail(10)['買超張數'].sum()
+                        })
+                status.update(label="掃描完成！", state="complete")
             
-            res_df = pd.DataFrame(analysis_results).sort_values("最近10日累計買超", ascending=False)
-            
-            st.subheader("🚩 法人週期操作清單 (1/1 至今)")
+            res_df = pd.DataFrame(results).sort_values("最近10日累計", ascending=False)
             st.dataframe(res_df, use_container_width=True, hide_index=True)
-            st.caption("※ 歷史最佳買點：指該標的過去法人發動「連續買超」的第一天。")
-
-    else:
-        st.warning("請先到『今日戰報』完成 1/1 補帳。")
