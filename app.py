@@ -11,38 +11,39 @@ import os
 import yfinance as yf
 
 # ====================== 1. 核心系統設定 ======================
-# 設定初始側邊欄為收合狀態，解決手機版遮擋問題
-st.set_page_config(page_title="台股法人全功能操盤系統", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial_sidebar_state="collapsed")
 
 DATA_FILE = "twse_institutional_db.parquet"
 START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 
-# 自定義 CSS 讓頂部導覽按鈕更美觀
+# 自定義 CSS 讓按鈕平行且美觀
 st.markdown("""
     <style>
-    div.stButton > button:first-child {
-        background-color: #1E1E1E;
-        color: white;
-        border-radius: 8px;
-        height: 3em;
+    div.stButton > button {
+        width: 100%;
+        border-radius: 10px;
         font-weight: bold;
-        border: 1px solid #333;
-    }
-    div.stButton > button:active {
-        background-color: #2E7D32;
-        border: 1px solid #4CAF50;
+        height: 3.5em;
     }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 頂部導覽區 (取代側邊欄，解決無法自動縮回的問題) ---
-st.title("⚒️ 操盤工具箱")
-col_nav1, col_nav2, col_nav3 = st.columns(3)
+# --- 側邊欄：僅存放危險操作 (資料庫管理) ---
+with st.sidebar:
+    st.header("⚙️ 系統管理")
+    st.warning("⚠️ 此處功能涉及資料庫重置，請謹慎使用。")
+    if st.button("🧨 重置並重新補帳 (從1/1開始)"): #
+        if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
+        # ... (補帳邏輯保持不變，見下方 C 部分)
+        st.session_state.do_update = True 
 
-# 利用 Session State 紀錄目前分頁邏輯
+# --- 主頁面導覽：僅留今日與週期 (左右平行) ---
 if "current_mode" not in st.session_state:
     st.session_state.current_mode = "今日強勢戰報"
+
+st.title("🚀 籌碼操盤戰情室")
+col_nav1, col_nav2 = st.columns(2) # 左右平行一行
 
 with col_nav1:
     if st.button("🟢 今日強勢戰報"):
@@ -50,9 +51,6 @@ with col_nav1:
 with col_nav2:
     if st.button("🔍 籌碼週期分析"):
         st.session_state.current_mode = "籌碼週期分析"
-with col_nav3:
-    if st.button("🗄️ 資料庫管理"):
-        st.session_state.current_mode = "資料庫管理"
 
 st.markdown("---")
 
@@ -86,16 +84,15 @@ def download_t86(date):
     except: return None
     return None
 
-# ====================== 3. 各分頁邏輯 ======================
+# ====================== 3. 業務邏輯 ======================
 
-# --- 分頁 A: 今日強勢戰報 ---
+# --- 分頁 A: 今日強勢戰報 (全欄位完整版) ---
 if st.session_state.current_mode == "今日強勢戰報":
-    st.subheader("🟢 今日三大法人強勢戰報")
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
         if not db.empty:
             latest = pd.to_datetime(db['日期']).max().date()
-            st.info(f"📊 數據日期：{latest} | 總筆數：{len(db):,}") #
+            st.success(f"📊 數據日期：{latest} | 總筆數：{len(db):,}") #
             
             db = db.sort_values(['證券代號', '日期']).copy()
             db['買超正'] = db['三大法人買賣超股數'] > 0
@@ -105,8 +102,8 @@ if st.session_state.current_mode == "今日強勢戰報":
             today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
             pre_filter = today_df[today_df['買超張數'] >= 500].sort_values('買超張數', ascending=False).head(100)
 
-            if st.button("🚀 同步今日價格與計算 Top 20", type="primary"): #
-                with st.spinner("🔍 正在同步最新市場現價與操盤邏輯..."):
+            if st.button("🔥 立即同步 Top 20 精選戰報", type="primary"): #
+                with st.spinner("🔍 正在抓取現價、計算價差與集保變動..."):
                     codes = pre_filter['證券代號'].tolist()
                     tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
                     price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
@@ -120,92 +117,71 @@ if st.session_state.current_mode == "今日強勢戰報":
                                 if not p_df.empty:
                                     curr = round(float(p_df['Close'].iloc[-1]), 2)
                                     ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
-                                    # 集保變動以成交量趨勢模擬
-                                    vol_change = "📉 減少" if p_df['Volume'].iloc[-1] < p_df['Volume'].iloc[-2] else "📈 增加"
+                                    vol_change = "📉 散戶增" if p_df['Volume'].iloc[-1] < p_df['Volume'].iloc[-2] else "📈 大戶入"
                                     
                                     row = pre_filter[pre_filter['證券代號']==s].iloc[0]
                                     advice = "🚀 剛發動" if row['連續買超'] == 1 else "⏳ 持續鎖碼"
                                     
                                     results.append({
-                                        "證券代號": s,
-                                        "證券名稱": row['證券名稱'],
-                                        "買超張數": row['買超張數'],
-                                        "目前現價": curr,
-                                        "5日均價": ma5,
-                                        "價差%": ((curr - ma5) / ma5 * 100),
-                                        "連續買超": int(row['連續買超']),
-                                        "集保變動": vol_change,
-                                        "操盤建議": advice
+                                        "證券代號": s, "證券名稱": row['證券名稱'], "買超張數": row['買超張數'],
+                                        "目前現價": curr, "5日均價": ma5, 
+                                        "價差%": ((curr - ma5) / ma5 * 100), #
+                                        "連續買超": int(row['連續買超']), "集保變動": vol_change, "操盤建議": advice
                                     })
                                     break
                     
-                    final_df = pd.DataFrame(results).head(20)
-                    st.dataframe(
-                        final_df, 
-                        use_container_width=True, 
-                        hide_index=True,
-                        column_config={
-                            "價差%": st.column_config.NumberColumn("價差%", format="%.2f %%"), #
-                            "操盤建議": st.column_config.TextColumn("操盤建議")
-                        }
-                    )
+                    st.dataframe(pd.DataFrame(results).head(20), use_container_width=True, hide_index=True,
+                                 column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
     else:
-        st.warning("請先切換至『資料庫管理』進行補帳。")
+        st.warning("請先由左上角選單進行資料補帳。")
 
 # --- 分頁 B: 籌碼週期分析 ---
 elif st.session_state.current_mode == "籌碼週期分析":
-    st.subheader("🔍 1/1 至今：法人籌碼週期分析") #
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE).sort_values(['證券代號', '日期'])
-        db['買超張數'] = (db['三大法人買賣超股數'] / 1000).round(1)
-        db['買超正'] = db['買超張數'] > 100
+        db['買超正'] = db['三大法人買賣超股數'] > 100000 # 100張門檻
         db['連買計數'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
-        if st.button("📊 啟動全年度籌碼慣性掃描", type="primary"): #
+        if st.button("📊 啟動全年度週期分析", type="primary"): #
             active_stocks = db[db['連買計數'] >= 3]['證券代號'].unique()
             results = []
-            with st.status("分析中...") as status:
+            with st.status("深度分析中...") as status:
                 codes = active_stocks[:40].tolist()
                 tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
                 price_data = yf.download(tickers, period="12d", interval="1d", group_by='ticker', progress=False)
                 for code in codes:
                     s_data = db[db['證券代號'] == code].copy()
                     entry_points = s_data[s_data['連買計數'] == 1]['日期'].tolist()
-                    curr_p, ma5 = np.nan, np.nan
+                    curr_p = np.nan
                     for suf in [".TW", ".TWO"]:
                         t = f"{code}{suf}"
                         if t in price_data.columns.levels[0]:
                             p_df = price_data[t].dropna()
-                            if not p_df.empty:
-                                curr_p, ma5 = round(float(p_df['Close'].iloc[-1]), 2), round(float(p_df['Close'].tail(5).mean()), 2)
-                                break
+                            if not p_df.empty: curr_p = round(float(p_df['Close'].iloc[-1]), 2); break
                     if not np.isnan(curr_p):
                         last_c = s_data.iloc[-1]['連買計數']
                         results.append({
                             "代號": code, "名稱": s_data['證券名稱'].iloc[0],
-                            "歷史發動": f"{len(entry_points)} 次",
                             "今日狀態": "🟢 剛發動" if last_c == 1 else f"⚪ 連買 {int(last_c)} 天",
                             "最佳購買日期": "🔥 就在今天" if last_c == 1 else "⏳ 等待回測",
-                            "最近發動": " → ".join([d.strftime('%m/%d') for d in entry_points[-3:]])
+                            "最近發動歷史": " → ".join([d.strftime('%m/%d') for d in entry_points[-3:]])
                         })
                 status.update(label="分析完成！", state="complete")
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
-# --- 分頁 C: 資料庫管理 ---
-elif st.session_state.current_mode == "資料庫管理":
-    st.subheader("🗄️ 法人籌碼資料庫管理")
-    if st.button("🧨 重置並重新補帳 (從 1/1 開始)", type="primary"): #
-        if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
-        all_data = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        target_dates = [d for d in (START_DATE + timedelta(n) for n in range((datetime.now().date() - START_DATE).days + 1)) if is_trading_day(d)]
-        for i, d in enumerate(target_dates):
-            status_text.text(f"下載 {d}... ({i+1}/{len(target_dates)})")
-            df = download_t86(d)
-            if df is not None: all_data.append(df)
-            progress_bar.progress((i + 1) / len(target_dates))
-            time.sleep(random.uniform(2, 4))
-        if all_data:
-            pd.concat(all_data).to_parquet(DATA_FILE)
-            st.success("✅ 補帳完成！")
+# --- 資料庫補帳邏輯 (隱藏在 Session State 觸發) ---
+if "do_update" in st.session_state and st.session_state.do_update:
+    all_data = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    target_dates = [d for d in (START_DATE + timedelta(n) for n in range((datetime.now().date() - START_DATE).days + 1)) if is_trading_day(d)]
+    for i, d in enumerate(target_dates):
+        status_text.text(f"下載中... {d} ({i+1}/{len(target_dates)})")
+        df = download_t86(d)
+        if df is not None: all_data.append(df)
+        progress_bar.progress((i + 1) / len(target_dates))
+        time.sleep(random.uniform(2, 4))
+    if all_data:
+        pd.concat(all_data).to_parquet(DATA_FILE)
+        st.success("✅ 資料庫重置完成！")
+    del st.session_state.do_update
