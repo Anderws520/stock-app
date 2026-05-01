@@ -18,7 +18,7 @@ START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 ADMIN_PASSWORD = "1023520" 
 
-# --- 側邊欄與安全鎖 ---
+# --- 側邊欄工具 ---
 with st.sidebar:
     st.title("⚒️ 操盤工具箱")
     mode = st.radio("功能切換", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"], index=0)
@@ -64,7 +64,7 @@ def download_t86(date):
 # ====================== 3. 主畫面業務邏輯 ======================
 st.header(f"📈 {mode}")
 
-# --- 分頁 A: 今日強勢戰報 ---
+# --- 今日強勢戰報：自動排序發動標的 ---
 if mode == "今日強勢戰報":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
@@ -74,11 +74,12 @@ if mode == "今日強勢戰報":
             db = db.sort_values(['證券代號', '日期']).copy()
             db['買超正'] = db['三大法人買賣超股數'] > 0
             db['連續買超'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+            
             today_df = db[pd.to_datetime(db['日期']).dt.date == latest].copy()
             today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
             pre_filter = today_df[today_df['買超張數'] >= 500].sort_values('買超張數', ascending=False).head(100)
 
-            with st.spinner("🔄 自動同步市場數據..."):
+            with st.spinner("🔄 同步即時價格與排序中..."):
                 codes = pre_filter['證券代號'].tolist()
                 tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
                 price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
@@ -95,14 +96,21 @@ if mode == "今日強勢戰報":
                                 results.append({
                                     "證券代號": s, "證券名稱": row['證券名稱'], "買超張數": row['買超張數'],
                                     "目前現價": curr, "5日均價": ma5, "價差%": ((curr - ma5) / ma5 * 100),
-                                    "連續買超": int(row['連續買超']), "操盤建議": "🚀 第一天發動" if row['連續買超'] == 1 else "⏳ 籌碼鎖定中"
+                                    "連續買超": int(row['連續買超']), 
+                                    "操盤建議": "🚀 第一天發動" if row['連續買超'] == 1 else "⏳ 籌碼鎖定中"
                                 })
                                 break
-                st.dataframe(pd.DataFrame(results).head(20), use_container_width=True, hide_index=True,
-                             column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
+                
+                # 自動排序邏輯：第一天發動優先
+                final_df = pd.DataFrame(results)
+                if not final_df.empty:
+                    final_df['sort_key'] = final_df['操盤建議'].apply(lambda x: 0 if "第一天" in x else 1)
+                    final_df = final_df.sort_values(['sort_key', '買超張數'], ascending=[True, False]).drop(columns=['sort_key'])
+                    st.dataframe(final_df.head(20), use_container_width=True, hide_index=True,
+                                 column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
     else: st.warning("請先完成資料補帳。")
 
-# --- 分頁 B: 籌碼週期分析 (欄位全整合) ---
+# --- 籌碼週期分析：自動排序剛發動標的 ---
 elif mode == "籌碼週期分析":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE).sort_values(['證券代號', '日期'])
@@ -111,15 +119,13 @@ elif mode == "籌碼週期分析":
         
         active_stocks = db[db['連買計數'] >= 3]['證券代號'].unique()
         results = []
-        with st.status("🔄 正在整合基礎數據與前瞻規劃...") as status:
+        with st.status("🔄 正在整合並自動優先排序剛發動標的...") as status:
             codes = active_stocks[:40].tolist()
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
             price_data = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
             
             for code in codes:
                 s_data = db[db['證券代號'] == code].copy()
-                entry_points = s_data[s_data['連買計數'] == 1]['日期'].tolist()
-                
                 for suf in [".TW", ".TWO"]:
                     t = f"{code}{suf}"
                     if t in price_data.columns.levels[0]:
@@ -127,9 +133,8 @@ elif mode == "籌碼週期分析":
                         if not p_df.empty: 
                             curr_p = round(float(p_df['Close'].iloc[-1]), 2)
                             ma5_p = round(float(p_df['Close'].tail(5).mean()), 2)
-                            
-                            # 前瞻性邏輯
                             avg_range = (p_df['High'] - p_df['Low']).tail(10).mean()
+                            
                             buy_suggest = round(min(ma5_p, p_df['Low'].tail(3).min()), 2)
                             sell_suggest = round(curr_p + (avg_range * 1.5), 2)
                             
@@ -139,15 +144,20 @@ elif mode == "籌碼週期分析":
                                 "目前現價": curr_p, "5日均價": ma5_p, "價差%": ((curr_p - ma5_p) / ma5_p * 100),
                                 "建議買點(支撐)": buy_suggest,
                                 "預期賣點(壓力)": sell_suggest,
-                                "今日狀態": "🟢 剛發動" if last_c == 1 else f"⚪ 連買 {int(last_c)} 天",
-                                "最佳購買日期": "🔥 就在今天" if last_c == 1 else "⏳ 等待回測",
-                                "歷史發動點": " → ".join([d.strftime('%m/%d') for d in entry_points[-3:]])
+                                "今日狀態": "🟢 剛發動" if last_c <= 1 else f"⚪ 連買 {int(last_c)} 天",
+                                "最佳購買日期": "🔥 就在今天" if last_c <= 1 else "⏳ 等待回測"
                             })
                             break
-            status.update(label="✅ 完整週期分析已自動完成！", state="complete")
+            
+            # 自動排序邏輯：剛發動優先
+            final_cycle_df = pd.DataFrame(results)
+            if not final_cycle_df.empty:
+                final_cycle_df['sort_key'] = final_cycle_df['今日狀態'].apply(lambda x: 0 if "剛發動" in x else 1)
+                final_cycle_df = final_cycle_df.sort_values('sort_key').drop(columns=['sort_key'])
+                status.update(label="✅ 優先排序分析完成！", state="complete")
         
         if results:
-            st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True,
+            st.dataframe(final_cycle_df, use_container_width=True, hide_index=True,
                          column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
 
 # --- 背景重置邏輯 ---
