@@ -64,7 +64,7 @@ def download_t86(date):
 # ====================== 3. 主畫面業務邏輯 ======================
 st.header(f"📈 {mode}")
 
-# --- 今日強勢戰報：自動排序並擴充至 50 檔 ---
+# --- 今日強勢戰報 ---
 if mode == "今日強勢戰報":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE)
@@ -77,7 +77,6 @@ if mode == "今日強勢戰報":
             
             today_df = db[pd.to_datetime(db['日期']).dt.date == latest].copy()
             today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
-            # 擴充篩選範圍至 150 檔以確保能選出 50 檔有效數據
             pre_filter = today_df[today_df['買超張數'] >= 300].sort_values('買超張數', ascending=False).head(150)
 
             with st.spinner("🔄 同步 Top 50 即時價格與發動排序中..."):
@@ -86,7 +85,7 @@ if mode == "今日強勢戰報":
                 price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
                 results = []
                 for s in codes:
-                    if len(results) >= 50: break # 限制顯示 50 檔
+                    if len(results) >= 50: break 
                     for suffix in [".TW", ".TWO"]:
                         t = f"{s}{suffix}"
                         if t in price_data.columns.levels[0]:
@@ -111,22 +110,22 @@ if mode == "今日強勢戰報":
                                  column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
     else: st.warning("請先完成資料補帳。")
 
-# --- 籌碼週期分析：自動排序並擴充至 50 檔 ---
+# --- 籌碼週期分析：新增「預期價差」欄位 ---
 elif mode == "籌碼週期分析":
     if os.path.exists(DATA_FILE):
         db = pd.read_parquet(DATA_FILE).sort_values(['證券代號', '日期'])
-        db['買超正'] = db['三大法人買賣超股數'] > 50000 # 降低一點門檻以確保標足夠 
+        db['買超正'] = db['三大法人買賣超股數'] > 50000 
         db['連買計數'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
         active_stocks = db[db['連買計數'] >= 3]['證券代號'].unique()
         results = []
-        with st.status("🔄 正在整合 Top 50 標的支撐壓力分析...") as status:
-            codes = active_stocks[:80].tolist() # 掃描前 80 檔以選出 50 檔
+        with st.status("🔄 正在整合 Top 50 獲利空間分析...") as status:
+            codes = active_stocks[:80].tolist() 
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
             price_data = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
             
             for code in codes:
-                if len(results) >= 50: break # 限制顯示 50 檔
+                if len(results) >= 50: break 
                 s_data = db[db['證券代號'] == code].copy()
                 for suf in [".TW", ".TWO"]:
                     t = f"{code}{suf}"
@@ -139,6 +138,8 @@ elif mode == "籌碼週期分析":
                             
                             buy_suggest = round(min(ma5_p, p_df['Low'].tail(3).min()), 2)
                             sell_suggest = round(curr_p + (avg_range * 1.5), 2)
+                            # 新增邏輯：計算獲利空間 (價差)
+                            profit_gap = round(sell_suggest - curr_p, 2)
                             
                             last_c = s_data.iloc[-1]['連買計數']
                             results.append({
@@ -146,6 +147,7 @@ elif mode == "籌碼週期分析":
                                 "目前現價": curr_p, "5日均價": ma5_p, "價差%": ((curr_p - ma5_p) / ma5_p * 100),
                                 "建議買點(支撐)": buy_suggest,
                                 "預期賣點(壓力)": sell_suggest,
+                                "預期價差": profit_gap, # 新增欄位顯示
                                 "今日狀態": "🟢 剛發動" if last_c <= 1 else f"⚪ 連買 {int(last_c)} 天",
                                 "最佳購買日期": "🔥 就在今天" if last_c <= 1 else "⏳ 等待回測"
                             })
@@ -155,8 +157,26 @@ elif mode == "籌碼週期分析":
             if not final_cycle_df.empty:
                 final_cycle_df['sort_key'] = final_cycle_df['今日狀態'].apply(lambda x: 0 if "剛發動" in x else 1)
                 final_cycle_df = final_cycle_df.sort_values('sort_key').drop(columns=['sort_key'])
-                status.update(label="✅ 前 50 檔前瞻分析排序完成！", state="complete")
+                status.update(label="✅ 前 50 檔獲利空間排序完成！", state="complete")
         
         if results:
             st.dataframe(final_cycle_df, use_container_width=True, hide_index=True,
-                         column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
+                         column_config={
+                             "價差%": st.column_config.NumberColumn("價差%", format="%.2f %%"),
+                             "預期價差": st.column_config.NumberColumn("預期價差", format="%.2f")
+                         })
+
+# --- 背景重置邏輯 ---
+if "do_update" in st.session_state and st.session_state.do_update:
+    if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
+    all_data = []
+    target_dates = [d for d in (START_DATE + timedelta(n) for n in range((datetime.now().date() - START_DATE).days + 1)) if is_trading_day(d)]
+    p_bar = st.progress(0)
+    for i, d in enumerate(target_dates):
+        df = download_t86(d)
+        if df is not None: all_data.append(df)
+        p_bar.progress((i + 1) / len(target_dates))
+        time.sleep(random.uniform(2, 4))
+    if all_data: pd.concat(all_data).to_parquet(DATA_FILE)
+    st.success("✅ 資料庫重置完成！")
+    del st.session_state.do_update
