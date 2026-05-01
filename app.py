@@ -8,53 +8,34 @@ from datetime import datetime, timedelta
 
 # --- 核心設定 ---
 DB_FILE = "stock_database.parquet"
-# 證交所三大法人買賣超日報 CSV 網址格式
-TWSE_URL = "https://www.twse.com.tw/fund/T86?response=csv&date={}&selectType=ALLBUT0999"
+GAS_URL = "https://script.google.com/macros/s/AKfycbxmoO3M1vsgwUStzDvDY5uRebEo_EGu79-FWSCLzSJYsB5Kz33h2WE8CuhBGEBAsjO7/exec"
 
-st.set_page_config(page_title="買點定位系統 4.0", layout="wide")
-st.title("🛡️ 買點定位系統 (官方數據直連版)")
+st.set_page_config(page_title="買點定位系統 6.0", layout="wide")
+st.title("🛡️ 買點定位系統 (嚴格同步版)")
 
 def load_db():
+    """載入並檢查資料庫是否健康"""
     if os.path.exists(DB_FILE):
         try:
             df = pd.read_parquet(DB_FILE)
-            if not df.empty and '日期' in df.columns:
+            # 必須包含日期且有實質內容才算成功
+            if not df.empty and '日期' in df.columns and '收盤價' in "".join(df.columns):
                 return df
-        except:
-            pass
+        except: pass
     return pd.DataFrame()
 
 def save_db(df):
+    """確保只有健康的資料才會被寫入檔案"""
+    if df.empty or '收盤價' not in "".join(df.columns): return False
     try:
-        # 強制轉字串存檔，解決 Arrow 類型衝突
         df.astype(str).to_parquet(DB_FILE, index=False)
         return True
-    except:
-        return False
+    except: return False
 
-# --- 官方 CSV 下載邏輯 ---
-def download_twse_csv(date_str):
-    """直接從證交所下載 CSV 並解析"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    url = TWSE_URL.format(date_str.replace('-', ''))
-    try:
-        response = requests.get(url, headers=headers, timeout=30)
-        if response.status_code == 200 and len(response.text) > 500:
-            # 證交所 CSV 前幾行是標題，需跳過；最後幾行是說明，也要過濾
-            df = pd.read_csv(io.StringIO(response.text), skiprows=1)
-            df = df.dropna(subset=['證券代號']) # 移除結尾說明行
-            df.columns = [c.replace(' ', '').strip() for c in df.columns]
-            return df
-        return None
-    except:
-        return None
-
-# --- 自動同步流程 ---
+# --- 核心同步邏輯 ---
 db = load_db()
 
-# 根據要求：從 4/27 開始補
+# 鎖定 4/27 起點，解決 4/26 週日與 5/1 休市的混亂
 if db.empty:
     curr = datetime(2026, 4, 27)
 else:
@@ -64,58 +45,68 @@ else:
 today = datetime.now()
 
 if curr <= today:
-    with st.status("📥 正在從證交所官網下載 CSV 補資料...", expanded=True) as status:
+    with st.status("📥 資料補齊中，請保持畫面開啟...", expanded=True) as status:
         while curr <= today:
             d_str = curr.strftime("%Y-%m-%d")
-            # 跳過週末與勞動節
+            # 排除週末與勞動節
             if curr.weekday() >= 5 or d_str == "2026-05-01":
                 st.write(f"🏮 {d_str} 休市，自動跳過")
             else:
-                st.write(f"⏳ 正在請求 {d_str} 的官方數據...")
-                time.sleep(5) # 官方網頁防爬機制較嚴，間隔拉長至 5 秒
+                st.write(f"⏳ 嘗試抓取 {d_str}...")
+                time.sleep(5) # 延長間隔至 5 秒，降低被當機率
                 
-                new_data = download_twse_csv(d_str)
+                success = False
+                try:
+                    r = requests.get(f"{GAS_URL}?date={d_str.replace('-', '')}", timeout=25)
+                    data = r.json()
+                    # 只有當 stat 是 OK 且真的有 data 才算數
+                    if data.get('stat') == 'OK' and data.get('data'):
+                        new_df = pd.DataFrame(data['data'], columns=data['fields'])
+                        new_df.columns = [c.strip() for c in new_df.columns]
+                        new_df['日期'] = d_str
+                        
+                        # 再次驗證欄位是否正確
+                        if '收盤價' in "".join(new_df.columns):
+                            db = pd.concat([db, new_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
+                            save_db(db)
+                            st.write(f"✅ {d_str} 數據補齊成功")
+                            success = True
+                except: pass
                 
-                if new_data is not None:
-                    new_data['日期'] = d_str
-                    db = pd.concat([db, new_data], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
-                    save_db(db)
-                    st.write(f"✅ {d_str} 下載並補入成功")
-                else:
-                    st.write(f"❌ {d_str} 請求失敗 (可能尚未開盤或連線繁忙)")
-                    break # 失敗則停止，避免被證交所暫時封鎖 IP
+                if not success:
+                    st.write(f"❌ {d_str} 抓取失敗 (GAS 被擋或休市)，將在下次啟動時重試")
+                    break # 失敗就停，不往後跑，避免存入空資料導致後續報錯
             curr += timedelta(days=1)
-        status.update(label="數據更新完成", state="complete")
+        status.update(label="數據檢查流程結束", state="complete")
 
-# --- 報表顯示 ---
+# --- 報表顯示 (防崩潰保護) ---
 if not db.empty:
-    latest_dt = db['日期'].max()
-    df_show = db[db['日期'] == latest_dt].copy()
-    
-    # 識別買賣超與價格欄位
-    buy_col = next((c for c in db.columns if '三大法人買賣超股數' in c), None)
-    price_col = '收盤價' # 官方 CSV 欄位固定
-    
-    if buy_col and price_col in df_show.columns:
-        report = []
-        for _, row in df_show.iterrows():
-            try:
-                # 處理 CSV 中的逗號數值
-                val = float(str(row[buy_col]).replace(',', ''))
-                if val <= 100000: continue # 濾掉買不到 100 張的
-                
-                report.append({
-                    '代號': row['證券代號'],
-                    '名稱': row['證券名稱'],
-                    '買超張數': int(round(val/1000, 0)),
-                    '現價': row[price_col],
-                    '日期': latest_dt
-                })
-            except: continue
+    try:
+        latest = db['日期'].max()
+        df_now = db[db['日期'] == latest].copy()
+        
+        # 智慧欄位對齊
+        buy_col = next((c for c in db.columns if '買賣超股數' in c or '合計' in c), None)
+        price_col = next((c for c in db.columns if '收盤價' in c), None)
+        
+        if buy_col and price_col:
+            res = []
+            for _, row in df_now.iterrows():
+                try:
+                    vol = float(str(row[buy_col]).replace(',', ''))
+                    if vol <= 0: continue
+                    res.append({
+                        '代號': row['證券代號'], '名稱': row['證券名稱'],
+                        '買超張數': int(round(vol/1000, 0)),
+                        '現價': row[price_col], '日期': latest
+                    })
+                except: continue
             
-        st.subheader(f"📊 官方數據分析報表 ({latest_dt})")
-        st.dataframe(pd.DataFrame(report).sort_values('買超張數', ascending=False), use_container_width=True, hide_index=True)
-    else:
-        st.error("❌ 官方資料解析失敗，請確認 4/27 之後是否有開盤數據")
+            st.subheader(f"📅 最新報表：{latest}")
+            st.dataframe(pd.DataFrame(res).sort_values('買超張數', ascending=False), use_container_width=True, hide_index=True)
+        else:
+            st.error("⚠️ 資料庫雖然有檔案，但缺少關鍵欄位，請稍候讓系統重新同步。")
+    except Exception as e:
+        st.error(f"報表生成出錯：{e}")
 else:
-    st.info("💡 系統正嘗試連接證交所下載 4/27 起的 CSV 檔案...")
+    st.info("💡 目前資料庫尚未建立 4/27 以後的正確數據，請點擊上方工具列 Rerun 嘗試補齊。")
