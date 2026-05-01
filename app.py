@@ -62,7 +62,8 @@ def download_t86(date):
         df['證券代號'] = df['證券代號'].astype(str).str.strip().str.zfill(4)
         
         return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']]
-    except:
+    except Exception as e:
+        st.error(f"{date} 下載失敗")
         return None
 
 # ====================== 更新資料 ======================
@@ -108,5 +109,55 @@ if os.path.exists(DATA_FILE):
         st.success(f"✅ 資料最新日期：**{latest}** | 總筆數：{len(db):,}")
         
         # 計算連續買超天數
-        db = db.sort_values(['證券代號', '日期'])
-        db['買超正'] = db['三大法人買
+        db = db.sort_values(['證券代號', '日期']).copy()
+        db['買超正'] = db['三大法人買賣超股數'] > 0
+        db['連續出現天數'] = db.groupby('證券代號')['買超正'].transform(
+            lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1)
+        )
+        
+        today_data = db[db['日期'] == latest].copy()
+        today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
+        
+        # 操盤建議
+        cond1 = (today_data['三大法人買賣超股數'] > 1000000) & (today_data['連續出現天數'] < 3)
+        cond2 = today_data['連續出現天數'] >= 3
+        today_data['操盤建議'] = np.select([cond1, cond2], ['🔥 雙強初現', '🔒 法人鎖碼'], default='✅ 值得觀察')
+        
+        # 整理成你要的欄位
+        today_data = today_data.rename(columns={'證券名稱': '股票名稱'})
+        today_data['關鍵分點'] = '三大法人買超'
+        today_data['5日均價'] = None
+        today_data['目前現價'] = None
+        today_data['價差%'] = None
+        today_data['集保人數變動'] = None
+        today_data['最佳購買日期'] = '待觀察'
+        
+        display_cols = [
+            '日期', '證券代號', '股票名稱', '關鍵分點', '買超張數',
+            '5日均價', '目前現價', '價差%', '連續出現天數',
+            '集保人數變動', '最佳購買日期', '操盤建議'
+        ]
+        
+        final_df = today_data[today_data['買超張數'] > 500].copy()
+        
+        st.subheader(f"📊 {latest} 專業操盤分析報表（買超 > 500張）")
+        st.dataframe(
+            final_df[display_cols].sort_values('買超張數', ascending=False),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "買超張數": st.column_config.NumberColumn(format="%.1f 張"),
+                "連續出現天數": st.column_config.NumberColumn(format="%d 天"),
+            }
+        )
+        
+        st.info("""**操盤手心法**：
+- 買超張數越大 + 連續出現天數越多 → 強度越高
+- 🔥 雙強初現：大買超且剛開始連買
+- 🔒 法人鎖碼：連續買超3天以上，籌碼較穩定""")
+    else:
+        st.info("資料庫尚無資料")
+else:
+    st.info("請點擊上方按鈕更新資料")
+
+st.caption("MA5、現價、價差% 目前為空。如需加入，請告訴我「加上MA5」")
