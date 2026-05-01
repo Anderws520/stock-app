@@ -18,6 +18,7 @@ START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 ADMIN_PASSWORD = "1023520" 
 
+# --- 側邊欄與安全鎖 ---
 with st.sidebar:
     st.title("⚒️ 操盤工具箱")
     mode = st.radio("功能切換", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"], index=0)
@@ -99,7 +100,7 @@ if mode == "今日強勢戰報":
                                 break
                 st.dataframe(pd.DataFrame(results).head(20), use_container_width=True, hide_index=True,
                              column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
-    else: st.warning("請先進入『資料庫管理』完成補帳。")
+    else: st.warning("請先完成資料補帳。")
 
 elif mode == "籌碼週期分析":
     if os.path.exists(DATA_FILE):
@@ -109,16 +110,13 @@ elif mode == "籌碼週期分析":
         
         active_stocks = db[db['連買計數'] >= 3]['證券代號'].unique()
         results = []
-        with st.status("🔄 深度週期與進出場價位分析中...") as status:
+        with st.status("🔄 正在進行前瞻性支撐壓力分析...") as status:
             codes = active_stocks[:40].tolist()
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
             price_data = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
             
             for code in codes:
                 s_data = db[db['證券代號'] == code].copy()
-                entry_points = s_data[s_data['連買計數'] == 1]['日期'].tolist()
-                
-                curr_p, ma5_p, high_p, low_p = np.nan, np.nan, np.nan, np.nan
                 for suf in [".TW", ".TWO"]:
                     t = f"{code}{suf}"
                     if t in price_data.columns.levels[0]:
@@ -126,22 +124,25 @@ elif mode == "籌碼週期分析":
                         if not p_df.empty: 
                             curr_p = round(float(p_df['Close'].iloc[-1]), 2)
                             ma5_p = round(float(p_df['Close'].tail(5).mean()), 2)
-                            high_p = round(float(p_df['High'].tail(10).max()), 2)
-                            low_p = round(float(p_df['Low'].tail(10).min()), 2)
+                            
+                            # --- 優化後的進出場邏輯 ---
+                            avg_range = (p_df['High'] - p_df['Low']).tail(10).mean() # 10日平均震幅
+                            # 建議買價：取 5日線與近期支撐的交集，代表回測點
+                            buy_suggest = round(min(ma5_p, p_df['Low'].tail(3).min()), 2)
+                            # 建議賣價：從現價加上 1.5 倍平均震幅，代表預期爆發壓力位
+                            sell_suggest = round(curr_p + (avg_range * 1.5), 2)
+                            
+                            last_c = s_data.iloc[-1]['連買計數']
+                            results.append({
+                                "代號": code, "名稱": s_data['證券名稱'].iloc[0],
+                                "目前現價": curr_p, "5日均線": ma5_p, "價差%": ((curr_p - ma5_p) / ma5_p * 100),
+                                "今日狀態": "🟢 剛發動" if last_c == 1 else f"⚪ 連買 {int(last_c)} 天",
+                                "建議買點(支撐)": buy_suggest,
+                                "預期賣點(壓力)": sell_suggest,
+                                "最佳購買日期": "🔥 就在今天" if last_c == 1 else "⏳ 等待回測"
+                            })
                             break
-                
-                if not np.isnan(curr_p):
-                    last_c = s_data.iloc[-1]['連買計數']
-                    results.append({
-                        "代號": code, "名稱": s_data['證券名稱'].iloc[0],
-                        "目前現價": curr_p, "5日均價": ma5_p, "價差%": ((curr_p - ma5_p) / ma5_p * 100),
-                        "今日狀態": "🟢 剛發動" if last_c == 1 else f"⚪ 連買 {int(last_c)} 天",
-                        "最佳購買日期": "🔥 就在今天" if last_c == 1 else "⏳ 等待回測",
-                        "最佳購買價位": low_p,
-                        "最佳賣出價位": high_p,
-                        "歷史發動點": " → ".join([d.strftime('%m/%d') for d in entry_points[-3:]])
-                    })
-            status.update(label="✅ 進出場價位分析完成！", state="complete")
+            status.update(label="✅ 前瞻分析完成！", state="complete")
         st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True,
                      column_config={"價差%": st.column_config.NumberColumn("價差%", format="%.2f %%")})
 
