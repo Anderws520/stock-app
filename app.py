@@ -16,7 +16,7 @@ st.title("🟢 台股三大法人買超專業操盤系統")
 st.markdown("**20年操盤手設計**｜從 2026/01/01 開始完整補帳｜含即時下載進度條")
 
 DATA_FILE = "twse_institutional_db.parquet"
-START_DATE = datetime(2026, 1, 1).date()
+START_DATE = datetime(2026, 1, 1).date() # 設定起始日期為 1/1
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 
 # ====================== 2. 2026 年休市行事曆設定 ======================
@@ -37,7 +37,6 @@ def clean_number(x):
     except: return 0.0
 
 def download_t86(date):
-    """下載證交所三大法人 CSV 檔案"""
     url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date.strftime('%Y%m%d')}&selectType=ALLBUT0999"
     try:
         resp = requests.get(url, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=30, verify=False)
@@ -56,60 +55,74 @@ def download_t86(date):
     except: return None
     return None
 
-# ====================== 3. 帶進度條的補帳按鈕 ======================
-if st.button("🔄 開始完整補帳 (從 1/1 起，顯示詳細進度)", type="primary"):
-    db = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
-    
-    # 決定起始日期
-    if db.empty:
-        current_target = START_DATE
-    else:
-        last_in_db = pd.to_datetime(db['日期']).max().date()
-        current_target = last_in_db + timedelta(days=1)
+# ====================== 3. 補帳與重置按鈕 ======================
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("🔄 繼續補帳 (從現有資料往後接)", type="secondary"):
+        db = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
+        if db.empty:
+            current_target = START_DATE
+        else:
+            last_in_db = pd.to_datetime(db['日期']).max().date()
+            current_target = last_in_db + timedelta(days=1)
         
-    today = datetime.now().date()
-    
-    # 計算總共需要檢查的天數 (用於進度條)
-    total_days = (today - current_target).days + 1
-    
-    if total_days > 0:
-        with st.status("📥 正在補齊數據...", expanded=True) as status:
+        today = datetime.now().date()
+        total_days = (today - current_target).days + 1
+        
+        if total_days > 0:
+            with st.status("📥 正在接續補齊數據...", expanded=True) as status:
+                progress_bar = st.progress(0)
+                processed_count = 0
+                while current_target <= today:
+                    processed_count += 1
+                    percent = min(processed_count / total_days, 1.0)
+                    if is_trading_day(current_target):
+                        status.write(f"⏳ ({processed_count}/{total_days}) 正在抓取 CSV: {current_target}...")
+                        new_df = download_t86(current_target)
+                        if new_df is not None:
+                            db = pd.concat([db, new_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
+                            db.to_parquet(DATA_FILE, index=False)
+                            progress_bar.progress(percent)
+                            time.sleep(random.uniform(4, 6))
+                    current_target += timedelta(days=1)
+                status.update(label="✅ 接續補帳完成！", state="complete")
+
+with col2:
+    if st.button("🧨 重置並重新補帳 (從 1/1 開始)", type="primary"):
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE) # 刪除舊的 4/27 資料
+        db = pd.DataFrame()
+        current_target = START_DATE
+        today = datetime.now().date()
+        total_days = (today - START_DATE).days + 1
+        
+        with st.status("🧨 正在清除舊資料並從 1/1 重新下載...", expanded=True) as status:
             progress_bar = st.progress(0)
             processed_count = 0
-            
             while current_target <= today:
                 processed_count += 1
-                percent = processed_count / total_days
-                
+                percent = min(processed_count / total_days, 1.0)
                 if is_trading_day(current_target):
-                    # 顯示具體下載進度
-                    status.write(f"⏳ ({processed_count}/{total_days}) 正在抓取 CSV: {current_target}...")
-                    
+                    status.write(f"🚀 (進度: {processed_count}/{total_days}) 下載中: {current_target}...")
                     new_df = download_t86(current_target)
                     if new_df is not None:
                         db = pd.concat([db, new_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
                         db.to_parquet(DATA_FILE, index=False)
-                        # 強制讓使用者看到進度條在跑
                         progress_bar.progress(percent)
-                        time.sleep(random.uniform(3, 5)) # 下載 CSV 需要間隔避免封鎖
-                    else:
-                        status.write(f"⚠️ {current_target} 無法取得數據 (可能尚未開盤或證交所維護)")
+                        time.sleep(random.uniform(4, 6))
                 else:
-                    status.write(f"😴 {current_target} 為休市日，跳過。")
+                    status.write(f"😴 {current_target} 休市，跳過。")
                     progress_bar.progress(percent)
-                
                 current_target += timedelta(days=1)
-            
-            status.update(label="✅ 年度補帳完成！", state="complete", expanded=False)
-    else:
-        st.info("數據已經是最新的，無需補帳。")
+            status.update(label="✅ 1/1 全新補帳完成！", state="complete")
 
 # ====================== 4. 報表顯示邏輯 ======================
 if os.path.exists(DATA_FILE):
     db = pd.read_parquet(DATA_FILE)
     if not db.empty:
         latest = pd.to_datetime(db['日期']).max().date()
-        st.success(f"📊 數據已補至：{latest} | 資料庫累積：{len(db):,}") #
+        st.success(f"📊 數據已補至：{latest} | 目前資料庫總筆數：{len(db):,}") # 此筆數應會從 5,266 開始增加
 
         db = db.sort_values(['證券代號', '日期']).copy()
         db['買超正'] = db['三大法人買賣超股數'] > 0
@@ -157,8 +170,3 @@ if os.path.exists(DATA_FILE):
                     use_container_width=True, hide_index=True,
                     column_config={"價差%": st.column_config.NumberColumn(format="%.2f %%")}
                 )
-            else:
-                st.info("請點擊按鈕同步價格。")
-                st.dataframe(pre_filter[['證券代號', '證券名稱', '買超張數', '連續買超']], use_container_width=True)
-else:
-    st.info("尚未有數據，請點擊上方按鈕開始從 1/1 補帳。")
