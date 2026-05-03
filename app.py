@@ -13,7 +13,7 @@ import yfinance as yf
 # ====================== 1. 核心系統設定 ======================
 st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial_sidebar_state="collapsed")
 
-# 鎖定路徑，確保讀取的是同一個檔案
+# 確保檔案路徑在 Streamlit 重新載入時不會跑掉
 DATA_FILE = os.path.join(os.getcwd(), "twse_db.parquet")
 START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
@@ -26,11 +26,15 @@ with st.sidebar:
     st.markdown("---")
     
     # 顯示目前檔案的真實狀態
+    last_d = None
     if os.path.exists(DATA_FILE):
-        db_info = pd.read_parquet(DATA_FILE)
-        last_d = pd.to_datetime(db_info['日期']).max().date()
-        st.success(f"📁 已存檔至：{last_d}")
-        st.caption(f"總筆數：{len(db_info)}")
+        try:
+            db_info = pd.read_parquet(DATA_FILE)
+            if not db_info.empty:
+                last_d = pd.to_datetime(db_info['日期']).max().date()
+                st.success(f"📁 已存檔至：{last_d}")
+                st.caption(f"總筆數：{len(db_info)}")
+        except: pass
     else:
         st.warning("⚠️ 目前無存檔紀錄")
 
@@ -38,8 +42,7 @@ with st.sidebar:
         pwd = st.text_input("密碼", type="password")
         if pwd == ADMIN_PASSWORD:
             if st.button("🚀 斷點續傳 (只補缺少的日期)", use_container_width=True):
-                # 自動判斷從哪天開始補
-                start_from = last_d + timedelta(days=1) if os.path.exists(DATA_FILE) else START_DATE
+                start_from = last_d + timedelta(days=1) if last_d else START_DATE
                 st.session_state.do_update = {"start": start_from, "reset": False}
             
             if st.checkbox("危險：重置資料庫") and st.button("🧨 刪除並重頭下載"):
@@ -84,9 +87,7 @@ if "do_update" in st.session_state:
         st.info("已經是最新資料了！")
         del st.session_state.do_update
     else:
-        # 讀取舊資料
         full_df = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
-        
         p_bar = st.progress(0)
         st_info = st.empty()
         
@@ -95,13 +96,11 @@ if "do_update" in st.session_state:
             day_df = download_t86(d)
             if day_df is not None:
                 full_df = pd.concat([full_df, day_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
-                # 關鍵：每下載完一天就「真的寫進檔案」
                 full_df.to_parquet(DATA_FILE, index=False)
-            
             p_bar.progress((i + 1) / len(dates))
-            time.sleep(random.uniform(2, 3)) # 避開證交所封鎖
+            time.sleep(random.uniform(2, 3))
             
-        st.success("✅ 資料已實體存入 Parquet 檔案！")
+        st.success("✅ 資料已成功存檔！")
         del st.session_state.do_update
         st.rerun()
 
@@ -109,50 +108,83 @@ if "do_update" in st.session_state:
 st.header(f"📈 {mode}")
 
 if os.path.exists(DATA_FILE):
-    # 讀取已存檔的資料
     main_db = pd.read_parquet(DATA_FILE)
     main_db['日期'] = pd.to_datetime(main_db['日期'])
     
     if mode == "今日強勢戰報":
-        latest = main_db['日期'].max().date()
-        st.info(f"📊 目前數據日期：{latest}")
-        # ... (其餘強勢戰報邏輯維持你原始的 Top 50 篩選)
-        # 這裡省略部分重複邏輯以節省篇幅，請確保維持你的 yf.download 排序
+        # 修正：自動找資料庫裡最新的一個交易日，解決週末沒資料問題
+        latest_date = main_db['日期'].max()
+        st.info(f"📊 目前數據日期：{latest_date.date()} (資料庫最新日)")
+        
+        db_s = main_db.sort_values(['證券代號', '日期']).copy()
+        db_s['買超正'] = db_s['三大法人買賣超股數'] > 0
+        db_s['連續買超'] = db_s.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+        
+        today_data = db_s[db_s['日期'] == latest_date].copy()
+        today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
+        pre_filter = today_data[today_data['買超張數'] >= 300].sort_values('買超張數', ascending=False).head(100)
+
+        if not pre_filter.empty:
+            with st.spinner("🔄 同步即時報價中..."):
+                codes = pre_filter['證券代號'].tolist()
+                tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
+                price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
+                res_today = []
+                for s in codes:
+                    if len(res_today) >= 50: break 
+                    for suffix in [".TW", ".TWO"]:
+                        t = f"{s}{suffix}"
+                        if t in price_data.columns.levels[0]:
+                            p_df = price_data[t].dropna()
+                            if not p_df.empty:
+                                curr = round(float(p_df['Close'].iloc[-1]), 2)
+                                ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
+                                row = pre_filter[pre_filter['證券代號']==s].iloc[0]
+                                res_today.append({
+                                    "代號": s, "名稱": row['證券名稱'], "買超張數": row['買超張數'],
+                                    "現價": curr, "5日均": ma5, "價差%": round(((curr - ma5) / ma5 * 100), 2),
+                                    "連買": int(row['連續買超']), 
+                                    "建議": "🚀 發動" if row['連續買超'] == 1 else "⏳ 鎖定"
+                                })
+                                break
+                if res_today:
+                    st.dataframe(pd.DataFrame(res_today), use_container_width=True, hide_index=True)
+        else:
+            st.warning("當日無符合買超 300 張以上之標的。")
 
     elif mode == "籌碼週期分析":
-        # 週期分析邏輯
         db_c = main_db.sort_values(['證券代號', '日期']).copy()
+        # 維持週期分析邏輯
         db_c['買超正'] = db_c['三大法人買賣超股數'] > 50000 
         db_c['連買'] = db_c.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
         active = db_c[db_c['連買'] >= 3]['證券代號'].unique()
         res_cycle = []
         
-        with st.status("正在計算獲利價差...") as status:
-            codes = active[:50].tolist() # 直接取前 50 檔
+        with st.status("🔄 正在整合獲利空間分析...") as status:
+            codes = active[:50].tolist() 
             if codes:
-                tickers = [f"{c}.TW" for c in codes] + [f"{c}.TWO" for c in codes]
-                p_data = yf.download(tickers, period="20d", progress=False, group_by='ticker')
-                
+                tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
+                p_data_c = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
                 for c in codes:
+                    s_data = db_c[db_c['證券代號'] == c].copy()
                     for suf in [".TW", ".TWO"]:
                         t = f"{c}{suf}"
-                        if t in p_data.columns.levels[0]:
-                            p_df = p_data[t].dropna()
+                        if t in p_data_c.columns.levels[0]:
+                            p_df = p_data_c[t].dropna()
                             if not p_df.empty:
                                 curr = round(float(p_df['Close'].iloc[-1]), 2)
                                 avg_r = (p_df['High'] - p_df['Low']).tail(10).mean()
-                                last_cnt = db_c[db_c['證券代號']==c]['連買'].iloc[-1]
+                                last_cnt = s_data['連買'].iloc[-1]
                                 res_cycle.append({
-                                    "代號": c, "名稱": db_c[db_c['證券代號']==c]['證券名稱'].iloc[0],
-                                    "現價": curr, "預期價差": round(avg_r * 1.5, 2),
-                                    "連買天數": int(last_cnt), "狀態": "🔥 發動中" if last_cnt <= 3 else "⏳ 籌碼集中"
+                                    "代號": c, "名稱": s_data['證券名稱'].iloc[0],
+                                    "現價": curr, "預期賣點": round(curr + (avg_r * 1.5), 2),
+                                    "連買天數": int(last_cnt), "狀態": "🔥 強勢" if last_cnt > 5 else "✅ 升溫"
                                 })
                                 break
             status.update(label="✅ 分析完成", state="complete")
         
         if res_cycle:
             st.dataframe(pd.DataFrame(res_cycle), use_container_width=True, hide_index=True)
-
 else:
-    st.warning("請先到側邊欄執行「斷點續傳」下載歷史籌碼資料。")
+    st.warning("請先執行斷點續傳下載資料。")
