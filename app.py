@@ -13,12 +13,13 @@ import yfinance as yf
 # ====================== 1. 核心系統設定 ======================
 st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial_sidebar_state="collapsed")
 
-DATA_FILE = "twse_institutional_db.parquet"
+# 確保檔案路徑在 Streamlit 重新載入時不會跑掉
+DATA_FILE = os.path.join(os.getcwd(), "twse_institutional_db.parquet")
 START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 ADMIN_PASSWORD = "1023520" 
 
-# --- 側邊欄工具 ---
+# --- 側邊欄工具 (必須先執行，確保 mode 被定義) ---
 with st.sidebar:
     st.title("⚒️ 操盤工具箱")
     mode = st.radio("功能切換", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"], index=0)
@@ -29,13 +30,13 @@ with st.sidebar:
         if pwd_input == ADMIN_PASSWORD:
             st.success("✅ 密碼正確")
             
-            # 顯示存檔狀態
             curr_date = START_DATE
             if os.path.exists(DATA_FILE):
                 try:
                     df_tmp = pd.read_parquet(DATA_FILE)
                     curr_date = pd.to_datetime(df_tmp['日期']).max().date()
                     st.write(f"📁 目前存檔至：{curr_date}")
+                    st.write(f"📊 總計筆數：{len(df_tmp)}")
                 except: pass
 
             if st.button("🚀 斷點續傳補帳", use_container_width=True):
@@ -73,7 +74,7 @@ def download_t86(date):
             return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']]
     except: return None
 
-# ====================== 3. 自動存儲邏輯 ======================
+# ====================== 3. 自動存儲邏輯 (補帳) ======================
 if "do_update" in st.session_state:
     task = st.session_state.do_update
     if task["reset"] and os.path.exists(DATA_FILE): os.remove(DATA_FILE)
@@ -92,7 +93,8 @@ if "do_update" in st.session_state:
             day_df = download_t86(d)
             if day_df is not None:
                 full_df = pd.concat([full_df, day_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'], keep='last')
-                full_df.to_parquet(DATA_FILE) # 自動存儲至檔案
+                # 強制寫入硬碟，確保「存起來」
+                full_df.to_parquet(DATA_FILE, index=False) 
             p_bar.progress((i + 1) / len(target_dates))
             time.sleep(random.uniform(1.5, 2.5))
         st.success("✅ 資料庫存儲完成！")
@@ -103,21 +105,27 @@ if "do_update" in st.session_state:
 st.header(f"📈 {mode}")
 
 if os.path.exists(DATA_FILE):
-    db = pd.read_parquet(DATA_FILE)
-    db['日期'] = pd.to_datetime(db['日期'])
-    
+    # 每次讀取都做一次錯誤檢查
+    try:
+        db = pd.read_parquet(DATA_FILE)
+        db['日期'] = pd.to_datetime(db['日期'])
+    except:
+        st.error("資料讀取異常，請到管理頁面重置資料庫。")
+        st.stop()
+
     if mode == "今日強勢戰報":
         latest = db['日期'].max().date()
-        st.info(f"📊 數據日期：{latest} | 目前已自動鎖定 Top 50 籌碼標的")
-        db = db.sort_values(['證券代號', '日期']).copy()
-        db['買超正'] = db['三大法人買賣超股數'] > 0
-        db['連續買超'] = db.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+        st.info(f"📊 數據日期：{latest} | 已鎖定 Top 50 標的")
         
-        today_df = db[db['日期'].dt.date == latest].copy()
+        db_s = db.sort_values(['證券代號', '日期']).copy()
+        db_s['買超正'] = db_s['三大法人買賣超股數'] > 0
+        db_s['連續買超'] = db_s.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+        
+        today_df = db_s[db_s['日期'].dt.date == latest].copy()
         today_df['買超張數'] = (today_df['三大法人買賣超股數'] / 1000).round(1)
         pre_filter = today_df[today_df['買超張數'] >= 300].sort_values('買超張數', ascending=False).head(150)
 
-        with st.spinner("🔄 同步 Top 50 即時價格中..."):
+        with st.spinner("🔄 同步即時報價中..."):
             codes = pre_filter['證券代號'].tolist()
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
             price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
@@ -183,14 +191,16 @@ if os.path.exists(DATA_FILE):
                                 "最佳買日": "🔥 就在今天" if last_c <= 1 else "⏳ 等待回測"
                             })
                             break
-            status.update(label="✅ 前 50 檔獲利分析完成！", state="complete")
+            status.update(label="✅ 分析完成！", state="complete")
         
-        # 確保顯示邏輯在 status 外部，防止表格消失
-        final_cycle_df = pd.DataFrame(res_cycle)
-        if not final_cycle_df.empty:
-            final_cycle_df['sort_key'] = final_cycle_df['今日狀態'].apply(lambda x: 0 if "剛發動" in x else 1)
-            final_cycle_df = final_cycle_df.sort_values('sort_key').drop(columns=['sort_key'])
-            st.dataframe(final_cycle_df, use_container_width=True, hide_index=True,
-                         column_config={"預期價差": st.column_config.NumberColumn("預期價差", format="%.2f")})
+        # --- 重要：將 DataFrame 渲染放在 status 區塊外面 ---
+        if res_cycle:
+            final_df = pd.DataFrame(res_cycle)
+            final_df['sort_key'] = final_df['今日狀態'].apply(lambda x: 0 if "剛發動" in x else 1)
+            final_df = final_df.sort_values('sort_key').drop(columns=['sort_key'])
+            st.dataframe(final_df, use_container_width=True, hide_index=True,
+                         column_config={
+                             "預期價差": st.column_config.NumberColumn("預期價差", format="%.2f")
+                         })
 else:
-    st.warning("請先完成資料補帳。")
+    st.warning("目前無歷史資料，請至側邊欄「資料庫管理」進行補帳。")
