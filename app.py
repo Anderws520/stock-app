@@ -13,19 +13,16 @@ import yfinance as yf
 # ====================== 1. 核心系統設定 ======================
 st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial_sidebar_state="collapsed")
 
-# 確保檔案路徑在 Streamlit 重新載入時不會跑掉
 DATA_FILE = os.path.join(os.getcwd(), "twse_db.parquet")
 START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 ADMIN_PASSWORD = "1023520" 
 
-# --- 側邊欄工具 ---
 with st.sidebar:
     st.title("⚒️ 操盤工具箱")
     mode = st.radio("功能切換", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"], index=0)
     st.markdown("---")
     
-    # 顯示目前檔案的真實狀態
     last_d = None
     if os.path.exists(DATA_FILE):
         try:
@@ -35,8 +32,6 @@ with st.sidebar:
                 st.success(f"📁 已存檔至：{last_d}")
                 st.caption(f"總筆數：{len(db_info)}")
         except: pass
-    else:
-        st.warning("⚠️ 目前無存檔紀錄")
 
     if mode == "資料庫管理":
         pwd = st.text_input("密碼", type="password")
@@ -44,11 +39,10 @@ with st.sidebar:
             if st.button("🚀 斷點續傳 (只補缺少的日期)", use_container_width=True):
                 start_from = last_d + timedelta(days=1) if last_d else START_DATE
                 st.session_state.do_update = {"start": start_from, "reset": False}
-            
-            if st.checkbox("危險：重置資料庫") and st.button("🧨 刪除並重頭下載"):
+            if st.checkbox("重置資料庫") and st.button("🧨 全部重新下載"):
                 st.session_state.do_update = {"start": START_DATE, "reset": True}
 
-# ====================== 2. 通用核心函數 ======================
+# ====================== 2. 下載函數 ======================
 def is_trading_day(d):
     if d.weekday() >= 5: return False
     holidays = ["2026-01-01", "2026-01-28", "2026-02-27", "2026-04-03", "2026-04-06", "2026-05-01"]
@@ -75,36 +69,25 @@ def download_t86(date):
             return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']].dropna()
     except: return None
 
-# ====================== 3. 補帳與寫入邏輯 ======================
 if "do_update" in st.session_state:
     task = st.session_state.do_update
     if task["reset"] and os.path.exists(DATA_FILE): os.remove(DATA_FILE)
-    
     end_date = datetime.now().date()
     dates = [task["start"] + timedelta(n) for n in range((end_date - task["start"]).days + 1) if is_trading_day(task["start"] + timedelta(n))]
-
-    if not dates:
-        st.info("已經是最新資料了！")
-        del st.session_state.do_update
-    else:
+    if dates:
         full_df = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
         p_bar = st.progress(0)
-        st_info = st.empty()
-        
         for i, d in enumerate(dates):
-            st_info.markdown(f"📥 正在同步日期：**{d}** ({i+1}/{len(dates)})")
             day_df = download_t86(d)
             if day_df is not None:
                 full_df = pd.concat([full_df, day_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
                 full_df.to_parquet(DATA_FILE, index=False)
             p_bar.progress((i + 1) / len(dates))
-            time.sleep(random.uniform(2, 3))
-            
-        st.success("✅ 資料已成功存檔！")
+            time.sleep(1.5)
         del st.session_state.do_update
         st.rerun()
 
-# ====================== 4. 畫面渲染邏輯 ======================
+# ====================== 3. 畫面渲染 ======================
 st.header(f"📈 {mode}")
 
 if os.path.exists(DATA_FILE):
@@ -112,57 +95,50 @@ if os.path.exists(DATA_FILE):
     main_db['日期'] = pd.to_datetime(main_db['日期'])
     
     if mode == "今日強勢戰報":
-        # 修正：自動找資料庫裡最新的一個交易日，解決週末沒資料問題
         latest_date = main_db['日期'].max()
-        st.info(f"📊 目前數據日期：{latest_date.date()} (資料庫最新日)")
-        
+        st.info(f"📊 數據日期：{latest_date.date()}")
         db_s = main_db.sort_values(['證券代號', '日期']).copy()
         db_s['買超正'] = db_s['三大法人買賣超股數'] > 0
         db_s['連續買超'] = db_s.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
         today_data = db_s[db_s['日期'] == latest_date].copy()
         today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
-        pre_filter = today_data[today_data['買超張數'] >= 300].sort_values('買超張數', ascending=False).head(100)
+        pre_filter = today_data[today_data['買超張數'] >= 200].sort_values('買超張數', ascending=False).head(100)
 
-        if not pre_filter.empty:
-            with st.spinner("🔄 同步即時報價中..."):
-                codes = pre_filter['證券代號'].tolist()
-                tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
-                price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
-                res_today = []
-                for s in codes:
-                    if len(res_today) >= 50: break 
-                    for suffix in [".TW", ".TWO"]:
-                        t = f"{s}{suffix}"
-                        if t in price_data.columns.levels[0]:
-                            p_df = price_data[t].dropna()
-                            if not p_df.empty:
-                                curr = round(float(p_df['Close'].iloc[-1]), 2)
-                                ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
-                                row = pre_filter[pre_filter['證券代號']==s].iloc[0]
-                                res_today.append({
-                                    "代號": s, "名稱": row['證券名稱'], "買超張數": row['買超張數'],
-                                    "現價": curr, "5日均": ma5, "價差%": round(((curr - ma5) / ma5 * 100), 2),
-                                    "連買": int(row['連續買超']), 
-                                    "建議": "🚀 發動" if row['連續買超'] == 1 else "⏳ 鎖定"
-                                })
-                                break
-                if res_today:
-                    st.dataframe(pd.DataFrame(res_today), use_container_width=True, hide_index=True)
-        else:
-            st.warning("當日無符合買超 300 張以上之標的。")
+        with st.spinner("🔄 同步即時價格與 5 日均線..."):
+            codes = pre_filter['證券代號'].tolist()
+            tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
+            price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
+            res_today = []
+            for s in codes:
+                for suffix in [".TW", ".TWO"]:
+                    t = f"{s}{suffix}"
+                    if t in price_data.columns.levels[0]:
+                        p_df = price_data[t].dropna()
+                        if not p_df.empty:
+                            curr = round(float(p_df['Close'].iloc[-1]), 2)
+                            ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
+                            row = pre_filter[pre_filter['證券代號']==s].iloc[0]
+                            res_today.append({
+                                "代號": s, "名稱": row['證券名稱'], "買超張數": row['買超張數'],
+                                "現價": curr, "5日均價": ma5, "價差%": round(((curr - ma5) / ma5 * 100), 2),
+                                "連買": int(row['連續買超']), 
+                                "操盤建議": "🚀 第一天發動" if row['連續買超'] == 1 else "⏳ 籌碼鎖定中"
+                            })
+                            break
+            if res_today:
+                st.dataframe(pd.DataFrame(res_today), use_container_width=True, hide_index=True)
 
     elif mode == "籌碼週期分析":
         db_c = main_db.sort_values(['證券代號', '日期']).copy()
-        # 維持週期分析邏輯
-        db_c['買超正'] = db_c['三大法人買賣超股數'] > 50000 
-        db_c['連買'] = db_c.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+        db_c['買超正'] = db_c['三大法人買賣超股數'] > 30000 
+        db_c['連買計數'] = db_c.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
-        active = db_c[db_c['連買'] >= 3]['證券代號'].unique()
+        active = db_c[db_c['連買計數'] >= 2]['證券代號'].unique()
         res_cycle = []
         
-        with st.status("🔄 正在整合獲利空間分析...") as status:
-            codes = active[:50].tolist() 
+        with st.status("🔄 完整計算建議買賣點...") as status:
+            codes = active[:150].tolist() 
             if codes:
                 tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
                 p_data_c = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
@@ -174,17 +150,24 @@ if os.path.exists(DATA_FILE):
                             p_df = p_data_c[t].dropna()
                             if not p_df.empty:
                                 curr = round(float(p_df['Close'].iloc[-1]), 2)
+                                ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
                                 avg_r = (p_df['High'] - p_df['Low']).tail(10).mean()
-                                last_cnt = s_data['連買'].iloc[-1]
+                                last_c = s_data['連買計數'].iloc[-1]
+                                
+                                buy_pt = round(min(ma5, p_df['Low'].tail(3).min()), 2)
+                                sell_pt = round(curr + (avg_r * 1.5), 2)
+                                
                                 res_cycle.append({
                                     "代號": c, "名稱": s_data['證券名稱'].iloc[0],
-                                    "現價": curr, "預期賣點": round(curr + (avg_r * 1.5), 2),
-                                    "連買天數": int(last_cnt), "狀態": "🔥 強勢" if last_cnt > 5 else "✅ 升溫"
+                                    "現價": curr, "預期價差": round(sell_pt - curr, 2),
+                                    "建議買點": buy_pt, "預期賣點": sell_pt,
+                                    "今日狀態": "🟢 剛發動" if last_c <= 1 else f"⚪ 連買 {int(last_c)} 天",
+                                    "最佳買日": "🔥 就在今天" if last_c <= 1 else "⏳ 等待回測"
                                 })
                                 break
-            status.update(label="✅ 分析完成", state="complete")
+            status.update(label=f"✅ 深度分析 {len(res_cycle)} 檔完成", state="complete")
         
         if res_cycle:
-            st.dataframe(pd.DataFrame(res_cycle), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(res_cycle).sort_values('今日狀態'), use_container_width=True, hide_index=True)
 else:
-    st.warning("請先執行斷點續傳下載資料。")
+    st.warning("請先執行補帳。")
