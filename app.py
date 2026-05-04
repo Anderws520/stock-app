@@ -28,7 +28,6 @@ def clean_number(x):
     except:
         return 0
 
-# ====================== 下載三大法人 ======================
 def download_t86(date):
     if not is_trading_day(date):
         return None
@@ -53,13 +52,13 @@ def download_t86(date):
             
         df['三大法人買賣超股數'] = df[buy_col].apply(clean_number)
         df = df.dropna(subset=['證券代號']).copy()
-        df['日期'] = pd.to_datetime(date).date()
+        df['日期'] = pd.to_datetime(date).date()   # 統一用 date 型別
         df['證券代號'] = df['證券代號'].astype(str).str.zfill(4)
         return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']]
     except:
         return None
 
-# ====================== 主更新功能 ======================
+# ====================== 自動更新 ======================
 if st.button("🔄 自動更新資料（斷點續傳）", type="primary", use_container_width=True):
     with st.spinner("正在執行斷點續傳..."):
         if os.path.exists(DATA_FILE):
@@ -67,7 +66,6 @@ if st.button("🔄 自動更新資料（斷點續傳）", type="primary", use_co
         else:
             db = pd.DataFrame(columns=['日期', '證券代號', '證券名稱', '三大法人買賣超股數'])
         
-        # 取得最後更新日期
         if db.empty:
             last_date = datetime(2026, 4, 27).date()
         else:
@@ -78,26 +76,28 @@ if st.button("🔄 自動更新資料（斷點續傳）", type="primary", use_co
         
         progress_bar = st.progress(0)
         status_text = st.empty()
-        updated_count = 0
-        total_days = 40  # 安全上限
+        updated = 0
+        total = 40
         
-        for i in range(total_days):
+        for i in range(total):
             if target > today:
                 break
             if is_trading_day(target):
-                status_text.info(f"正在抓取 {target} ({i+1}/{total_days})")
+                status_text.info(f"正在抓取 {target} ({i+1}/{total})")
                 new_df = download_t86(target)
                 if new_df is not None and not new_df.empty:
                     db = pd.concat([db, new_df], ignore_index=True)
                     db = db.drop_duplicates(subset=['日期', '證券代號'])
+                    # 重要：儲存前統一轉型，避免 ArrowTypeError
+                    db['日期'] = pd.to_datetime(db['日期']).dt.date
                     db.to_parquet(DATA_FILE, index=False)
-                    updated_count += 1
+                    updated += 1
                     status_text.success(f"✅ {target} 更新成功")
-            progress_bar.progress(min((i+1)/total_days, 1.0))
+            progress_bar.progress(min((i+1)/total, 1.0))
             target += timedelta(days=1)
             time.sleep(random.uniform(5.5, 8.5))
         
-        st.success(f"更新完成！本次共更新 {updated_count} 天資料")
+        st.success(f"更新完成！本次共更新 {updated} 天資料")
 
 # ====================== 顯示報表 ======================
 if os.path.exists(DATA_FILE):
@@ -105,7 +105,6 @@ if os.path.exists(DATA_FILE):
     latest = pd.to_datetime(db['日期']).max().date()
     st.success(f"✅ 最新資料日期：**{latest}** | 總筆數：{len(db):,}")
     
-    # 計算連續買超天數
     db = db.sort_values(['證券代號', '日期']).copy()
     db['買超正'] = db['三大法人買賣超股數'] > 0
     db['連續出現天數'] = db.groupby('證券代號')['買超正'].transform(
@@ -115,27 +114,24 @@ if os.path.exists(DATA_FILE):
     today_data = db[db['日期'] == latest].copy()
     today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
     
-    # 抓取價格與 MA5
-    with st.spinner("正在抓取最新股價與計算 MA5（約 30\~60 秒）..."):
+    # 抓價格
+    with st.spinner("正在抓取股價與計算 MA5..."):
         codes = today_data['證券代號'].tolist()[:100]
         price_dict = {}
-        for i, code in enumerate(codes):
+        for code in codes:
             try:
                 data = yf.download(f"{code}.TW", period="10d", progress=False, threads=False)
                 if not data.empty:
                     close = round(data['Close'].iloc[-1], 2)
-                    ma5 = round(data['Close'].tail(5).mean(), 2) if len(data) >= 5 else close
+                    ma5 = round(data['Close'].tail(5).mean(), 2)
                     price_dict[code] = {'現價': close, 'MA5': ma5}
             except:
                 pass
-            if i % 20 == 0 and i > 0:
-                st.text(f"已處理 {i}/{len(codes)} 檔...")
     
     today_data['目前現價'] = today_data['證券代號'].map(lambda x: price_dict.get(x, {}).get('現價'))
     today_data['5日均價'] = today_data['證券代號'].map(lambda x: price_dict.get(x, {}).get('MA5'))
     today_data['價差%'] = ((today_data['目前現價'] - today_data['5日均價']) / today_data['5日均價'] * 100).round(2)
     
-    # 操盤建議
     cond1 = (today_data['三大法人買賣超股數'] > 1000000) & (today_data['連續出現天數'] < 3)
     cond2 = today_data['連續出現天數'] >= 3
     today_data['操盤建議'] = np.select([cond1, cond2], ['🔥 雙強初現', '🔒 法人鎖碼'], default='✅ 值得觀察')
@@ -147,9 +143,9 @@ if os.path.exists(DATA_FILE):
     
     final_df = today_data[today_data['買超張數'] > 500].copy()
     
-    st.subheader(f"📊 {latest} 專業操盤分析報表（買超 > 500張）")
+    st.subheader(f"📊 {latest} 專業操盤分析報表")
     st.dataframe(
-        final_df[display_cols].sort_values('買超張數', ascending=False).head(50),
+        final_df[display_cols].sort_values('買超張數', ascending=False),
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -161,6 +157,6 @@ if os.path.exists(DATA_FILE):
         }
     )
 else:
-    st.info("請點擊上方按鈕進行首次資料更新")
+    st.info("請點擊上方按鈕進行首次更新")
 
-st.caption("✅ 已開啟自動斷點續傳 • 價格使用 yfinance 抓取")
+st.caption("已修正 Parquet 型別錯誤 • 自動斷點續傳")
