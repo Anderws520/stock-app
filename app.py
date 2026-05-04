@@ -18,6 +18,10 @@ START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
 ADMIN_PASSWORD = "1023520" 
 
+# 自動檢查今日是否為最新
+def get_today_str():
+    return datetime.now().strftime('%Y-%m-%d')
+
 with st.sidebar:
     st.title("⚒️ 操盤工具箱")
     mode = st.radio("功能切換", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"], index=0)
@@ -29,29 +33,26 @@ with st.sidebar:
             db_info = pd.read_parquet(DATA_FILE)
             if not db_info.empty:
                 last_d = pd.to_datetime(db_info['日期']).max().date()
-                st.success(f"📁 已存檔至：{last_d}")
-                st.caption(f"總筆數：{len(db_info)}")
+                if last_d < datetime.now().date() and datetime.now().hour >= 15:
+                    st.warning(f"⚠️ 資料非最新 (最後更新: {last_d})")
+                else:
+                    st.success(f"📁 資料庫日期：{last_d}")
         except: pass
 
     if mode == "資料庫管理":
-        pwd = st.text_input("密碼", type="password")
+        pwd = st.text_input("管理密碼", type="password")
         if pwd == ADMIN_PASSWORD:
-            if st.button("🚀 斷點續傳 (補齊缺日)", use_container_width=True):
+            if st.button("🚀 執行斷點續傳 (自動補齊至今日)", use_container_width=True):
                 start_from = last_d + timedelta(days=1) if last_d else START_DATE
                 st.session_state.do_update = {"start": start_from, "reset": False}
-            if st.checkbox("重置資料庫") and st.button("🧨 全部重抓"):
+            if st.checkbox("危險動作：重置資料庫") and st.button("🧨 全部重抓"):
                 st.session_state.do_update = {"start": START_DATE, "reset": True}
 
-# ====================== 2. 通用功能函數 ======================
+# ====================== 2. 資料下載邏輯 ======================
 def is_trading_day(d):
     if d.weekday() >= 5: return False
     holidays = ["2026-01-01", "2026-01-28", "2026-02-27", "2026-04-03", "2026-04-06", "2026-05-01"]
     return d.strftime('%Y-%m-%d') not in holidays
-
-def clean_number(x):
-    if isinstance(x, str): x = re.sub(r'[^\d.-]', '', x)
-    try: return float(x)
-    except: return 0.0
 
 def download_t86(date):
     url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date.strftime('%Y%m%d')}&selectType=ALLBUT0999"
@@ -63,7 +64,7 @@ def download_t86(date):
         df.columns = [str(col).strip().replace('\n','').replace(' ','') for col in df.columns]
         buy_col = next((col for col in df.columns if "三大法人買賣超股數" in col), None)
         if buy_col:
-            df['三大法人買賣超股數'] = df[buy_col].apply(clean_number)
+            df['三大法人買賣超股數'] = df[buy_col].apply(lambda x: float(re.sub(r'[^\d.-]', '', str(x))) if str(x).strip() else 0.0)
             df['日期'] = pd.to_datetime(date)
             df['證券代號'] = df['證券代號'].astype(str).str.extract(r'(\d+)')[0]
             return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']].dropna()
@@ -87,7 +88,7 @@ if "do_update" in st.session_state:
         del st.session_state.do_update
         st.rerun()
 
-# ====================== 3. 核心顯示邏輯 ======================
+# ====================== 3. 畫面顯示邏輯 ======================
 st.header(f"📈 {mode}")
 
 if os.path.exists(DATA_FILE):
@@ -104,12 +105,13 @@ if os.path.exists(DATA_FILE):
         
         today_data = db_s[db_s['日期'] == latest_date].copy()
         today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
-        pre_filter = today_data[today_data['買超張數'] >= 200].sort_values('買超張數', ascending=False).head(100)
+        pre_filter = today_data[today_data['買超張數'] >= 200].sort_values('買超張數', ascending=False).head(120)
 
-        with st.spinner("🚀 同步報價並計算戰報..."):
+        with st.spinner("🚀 正在獲取最新即時報價..."):
             codes = pre_filter['證券代號'].tolist()
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
-            price_data = yf.download(tickers, period="10d", interval="1d", group_by='ticker', progress=False)
+            # 強制抓取最新收盤
+            price_data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', progress=False, repair=True)
             res_today = []
             for s in codes:
                 for suffix in [".TW", ".TWO"]:
@@ -124,30 +126,30 @@ if os.path.exists(DATA_FILE):
                             res_today.append({
                                 "代號": s, "名稱": row['證券名稱'], "買超張數": row['買超張數'],
                                 "現價": curr, "5日均價": ma5, 
-                                "價差%": f"{diff_pct}%", # 修正：百分比格式
+                                "價差%": f"{diff_pct}%", # 恢復百分比符號
                                 "連買": int(row['連續買超']), 
                                 "操盤建議": "🚀 第一天發動" if row['連續買超'] == 1 else "⏳ 籌碼鎖定中",
-                                "_sort_order": 0 if row['連續買超'] == 1 else 1 # 用於排序
+                                "_sort": 0 if row['連續買超'] == 1 else 1
                             })
                             break
             if res_today:
-                # 修正：優先排序「第一天發動」
-                df_final = pd.DataFrame(res_today).sort_values(['_sort_order', '買超張數'], ascending=[True, False])
-                st.dataframe(df_final.drop(columns=['_sort_order']), use_container_width=True, hide_index=True)
+                # 排序修正：發動標的優先
+                df_res = pd.DataFrame(res_today).sort_values(['_sort', '買超張數'], ascending=[True, False])
+                st.dataframe(df_res.drop(columns=['_sort']), use_container_width=True, hide_index=True)
 
     elif mode == "籌碼週期分析":
         db_c = main_db.sort_values(['證券代號', '日期']).copy()
-        db_c['買超正'] = db_c['三大法人買賣超股數'] > 30000 
-        db_c['連買計數'] = db_c.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+        db_c['買超超過門檻'] = db_c['三大法人買賣超股數'] > 30000 
+        db_c['連買計數'] = db_c.groupby('證券代號')['買超超過門檻'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         
         active = db_c[db_c['連買計數'] >= 2]['證券代號'].unique()
         res_cycle = []
         
-        with st.status("🔄 完整分析建議買賣點...") as status:
+        with st.status("🔄 深度分析獲利空間與買點...") as status:
             codes = active[:150].tolist() 
             if codes:
                 tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
-                p_data_c = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
+                p_data_c = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False, repair=True)
                 for c in codes:
                     s_data = db_c[db_c['證券代號'] == c].copy()
                     for suf in [".TW", ".TWO"]:
@@ -161,7 +163,7 @@ if os.path.exists(DATA_FILE):
                                 last_c = s_data['連買計數'].iloc[-1]
                                 
                                 buy_pt = round(min(ma5, p_df['Low'].tail(3).min()), 2)
-                                sell_pt = round(curr + (avg_r * 1.5), 2)
+                                sell_pt = round(curr + (avg_r * 1.6), 2)
                                 
                                 res_cycle.append({
                                     "代號": c, "名稱": s_data['證券名稱'].iloc[0],
@@ -169,14 +171,14 @@ if os.path.exists(DATA_FILE):
                                     "建議買點": buy_pt, "預期賣點": sell_pt,
                                     "今日狀態": "🟢 剛發動" if last_c <= 1 else f"⚪ 連買 {int(last_c)} 天",
                                     "最佳買日": "🔥 就在今天" if last_c <= 1 else "⏳ 等待回測",
-                                    "_sort_prio": 0 if last_c <= 1 else 1 # 用於排序
+                                    "_sort_prio": 0 if last_c <= 1 else 1
                                 })
                                 break
-            status.update(label=f"✅ 分析完成，已找到 {len(res_cycle)} 檔標的", state="complete")
+            status.update(label=f"✅ 分析完成！目前共有 {len(res_cycle)} 檔強勢股", state="complete")
         
         if res_cycle:
-            # 修正：優先排序「就在今天」
+            # 排序修正：就在今天優先
             df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort_prio', '預期價差'], ascending=[True, False])
             st.dataframe(df_cycle.drop(columns=['_sort_prio']), use_container_width=True, hide_index=True)
 else:
-    st.warning("請先執行斷點續傳。")
+    st.warning("請先執行資料庫管理中的『斷點續傳』補齊資料。")
