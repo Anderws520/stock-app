@@ -31,66 +31,87 @@ with st.sidebar:
                 last_d = pd.to_datetime(db_info['日期']).max().date()
                 st.success(f"📁 資料庫日期：{last_d}")
                 if last_d < datetime.now().date():
-                    st.warning(f"🔴 偵測到新交易日 (5/4)，請點擊下方補帳")
+                    st.warning("⚠️ 偵測到日期落後，請執行補帳")
         except: pass
 
     if mode == "資料庫管理":
         pwd = st.text_input("管理密碼", type="password")
         if pwd == ADMIN_PASSWORD:
-            if st.button("🚀 強制執行 5/4 補帳", use_container_width=True):
-                # 關鍵修正：確保從資料庫最後一天往後抓到「今天」
+            # 這裡就是您說的 CSV 抓取觸發點
+            if st.button("🚀 執行 CSV 斷點續傳 (補齊 5/4)", use_container_width=True):
                 start_from = last_d + timedelta(days=1) if last_d else START_DATE
                 st.session_state.do_update = {"start": start_from, "reset": False}
             if st.checkbox("重置資料庫") and st.button("🧨 全部重抓"):
                 st.session_state.do_update = {"start": START_DATE, "reset": True}
 
-# ====================== 2. 下載與排除休市邏輯 ======================
+# ====================== 2. Grok 模式 CSV 下載邏輯 ======================
 def is_trading_day(d):
     if d.weekday() >= 5: return False
-    # 5/1 勞動節休市，已加入排除清單
     holidays = ["2026-01-01", "2026-01-28", "2026-02-27", "2026-04-03", "2026-04-06", "2026-05-01"]
     return d.strftime('%Y-%m-%d') not in holidays
 
-def download_t86(date):
-    url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date.strftime('%Y%m%d')}&selectType=ALLBUT0999"
+def download_t86_csv(date):
+    # 這就是您要求的 CSV 下載路徑
+    date_str = date.strftime('%Y%m%d')
+    url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date_str}&selectType=ALLBUT0999"
+    
     try:
         resp = requests.get(url, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=30, verify=False)
-        # 檢查是否真的有資料，避免抓到空回應
-        if "查詢無資料" in resp.text or len(resp.text) < 100: return None
-        lines = [line.strip() for line in resp.text.splitlines() if "證券代號" in line or len(line.split(',')) > 10]
-        if len(lines) < 10: return None
-        df = pd.read_csv(StringIO("\n".join(lines)), encoding='big5', on_bad_lines='skip')
-        df.columns = [str(col).strip().replace('\n','').replace(' ','') for col in df.columns]
-        buy_col = next((col for col in df.columns if "三大法人買賣超股數" in col), None)
+        # 排除休市或尚未更新的情況
+        if "查詢無資料" in resp.text or len(resp.text) < 500:
+            return None
+        
+        # 模擬 Grok 解析：尋找包含證券代號的那一行作為標題
+        lines = resp.text.splitlines()
+        data_start_idx = -1
+        for i, line in enumerate(lines):
+            if "證券代號" in line:
+                data_start_idx = i
+                break
+        
+        if data_start_idx == -1: return None
+        
+        # 讀取 CSV
+        clean_csv = "\n".join(lines[data_start_idx:])
+        df = pd.read_csv(StringIO(clean_csv), encoding='big5', on_bad_lines='skip')
+        
+        # 清理欄位名與數值
+        df.columns = [str(c).strip().replace('"', '') for c in df.columns]
+        buy_col = next((c for c in df.columns if "三大法人買賣超股數" in c), None)
+        
         if buy_col:
-            df['三大法人買賣超股數'] = df[buy_col].apply(lambda x: float(re.sub(r'[^\d.-]', '', str(x))) if str(x).strip() else 0.0)
+            # 移除逗號並轉數字
+            df['三大法人買賣超股數'] = df[buy_col].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce').fillna(0)
             df['日期'] = pd.to_datetime(date)
+            # 確保代號是乾淨的數字字串
             df['證券代號'] = df['證券代號'].astype(str).str.extract(r'(\d+)')[0]
-            return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']].dropna()
-    except: return None
+            return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']].dropna(subset=['證券代號'])
+    except Exception as e:
+        return None
 
 if "do_update" in st.session_state:
     task = st.session_state.do_update
     if task["reset"] and os.path.exists(DATA_FILE): os.remove(DATA_FILE)
-    end_date = datetime.now().date()
-    # 關鍵：生成包含 5/4 的日期序列
-    dates = [task["start"] + timedelta(n) for n in range((end_date - task["start"]).days + 1) if is_trading_day(task["start"] + timedelta(n))]
     
-    if dates:
+    end_date = datetime.now().date()
+    # 確保 5/4 包含在下載清單中
+    dates_to_fetch = [task["start"] + timedelta(n) for n in range((end_date - task["start"]).days + 1) if is_trading_day(task["start"] + timedelta(n))]
+    
+    if dates_to_fetch:
         full_df = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
         p_bar = st.progress(0)
-        for i, d in enumerate(dates):
-            day_df = download_t86(d)
+        for i, d in enumerate(dates_to_fetch):
+            day_df = download_t86_csv(d)
             if day_df is not None:
                 full_df = pd.concat([full_df, day_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
                 full_df.to_parquet(DATA_FILE, index=False)
-            p_bar.progress((i + 1) / len(dates))
-            time.sleep(1.5)
-        st.success(f"✅ 成功補齊至 {dates[-1].date()}")
+            p_bar.progress((i + 1) / len(dates_to_fetch))
+            time.sleep(2) # 增加延遲避免被證交所阻擋
+        
         del st.session_state.do_update
         st.rerun()
 
-# ====================== 3. 畫面顯示 (所有欄位嚴格維持) ======================
+# ====================== 3. 畫面渲染 (欄位嚴格維持) ======================
 st.header(f"📈 {mode}")
 
 if os.path.exists(DATA_FILE):
@@ -99,7 +120,7 @@ if os.path.exists(DATA_FILE):
     latest_db_date = main_db['日期'].max()
     
     if mode == "今日強勢戰報":
-        st.info(f"📊 數據基準日：{latest_db_date.date()}")
+        st.info(f"📊 數據日期：{latest_db_date.date()}")
         db_s = main_db.sort_values(['證券代號', '日期']).copy()
         db_s['買超正'] = db_s['三大法人買賣超股數'] > 0
         db_s['連續買超'] = db_s.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
@@ -108,7 +129,7 @@ if os.path.exists(DATA_FILE):
         today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
         pre_filter = today_data[today_data['買超張數'] >= 200].sort_values('買超張數', ascending=False).head(100)
 
-        with st.spinner("🚀 即時行情計算與排序優化中..."):
+        with st.spinner("🚀 同步即時報價中..."):
             codes = pre_filter['證券代號'].tolist()
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
             price_data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', progress=False)
@@ -129,7 +150,7 @@ if os.path.exists(DATA_FILE):
                                 "價差%": f"{diff_pct}%",
                                 "連買": int(row['連續買超']), 
                                 "操盤建議": "🚀 第一天發動" if row['連續買超'] == 1 else "⏳ 籌碼鎖定中",
-                                "_sort": 0 if row['連續買超'] == 1 else 1 # 第一天優先
+                                "_sort": 0 if row['連續買超'] == 1 else 1
                             })
                             break
             if res_today:
@@ -137,7 +158,7 @@ if os.path.exists(DATA_FILE):
                 st.dataframe(df_res.drop(columns=['_sort']), use_container_width=True, hide_index=True)
 
     elif mode == "籌碼週期分析":
-        st.info(f"📊 週期基準日：{latest_db_date.date()}")
+        st.info(f"📊 週期基準：{latest_db_date.date()}")
         db_c = main_db.sort_values(['證券代號', '日期']).copy()
         db_c['大買'] = db_c['三大法人買賣超股數'] > 30000 
         db_c['連買計數'] = db_c.groupby('證券代號')['大買'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
@@ -145,7 +166,7 @@ if os.path.exists(DATA_FILE):
         active = db_c[db_c['連買計數'] >= 2]['證券代號'].unique()
         res_cycle = []
         
-        with st.status("🔄 深度獲利分析與買點計算...") as status:
+        with st.status("🔄 深度獲利分析...") as status:
             codes = active[:150].tolist() 
             if codes:
                 tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
@@ -170,7 +191,7 @@ if os.path.exists(DATA_FILE):
                                     "建議買點": buy_pt, "預期賣點": sell_pt,
                                     "今日狀態": "🟢 剛發動" if last_c <= 1 else f"⚪ 連買 {int(last_c)} 天",
                                     "最佳買日": "🔥 就在今天" if last_c <= 1 else "⏳ 等待回測",
-                                    "_sort": 0 if last_c <= 1 else 1 # 今天優先
+                                    "_sort": 0 if last_c <= 1 else 1
                                 })
                                 break
             status.update(label="✅ 分析完成", state="complete")
@@ -179,4 +200,4 @@ if os.path.exists(DATA_FILE):
             df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '預期價差'], ascending=[True, False])
             st.dataframe(df_cycle.drop(columns=['_sort']), use_container_width=True, hide_index=True)
 else:
-    st.warning("請執行補帳以更新 5/4 資料。")
+    st.warning("請執行補帳以更新 5/4 數據。")
