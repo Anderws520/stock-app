@@ -13,6 +13,11 @@ import yfinance as yf
 # ====================== 1. 系統核心設定 ======================
 st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial_sidebar_state="collapsed")
 
+# 解決快取問題：強制清理快取確保資料刷新
+if st.sidebar.button("🧹 清除系統快取"):
+    st.cache_data.clear()
+    st.rerun()
+
 DATA_FILE = os.path.join(os.getcwd(), "twse_db.parquet")
 START_DATE = datetime(2026, 1, 1).date()
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
@@ -29,65 +34,58 @@ with st.sidebar:
             db_info = pd.read_parquet(DATA_FILE)
             if not db_info.empty:
                 last_d = pd.to_datetime(db_info['日期']).max().date()
-                st.success(f"📁 資料庫日期：{last_d}")
+                st.success(f"📁 目前資料庫：{last_d}")
                 if last_d < datetime.now().date():
-                    st.warning("⚠️ 偵測到日期落後，請執行補帳")
+                    st.error("🔴 資料落後，請至管理頁補帳")
         except: pass
 
     if mode == "資料庫管理":
         pwd = st.text_input("管理密碼", type="password")
         if pwd == ADMIN_PASSWORD:
-            # 這裡就是您說的 CSV 抓取觸發點
-            if st.button("🚀 執行 CSV 斷點續傳 (補齊 5/4)", use_container_width=True):
+            if st.button("🚀 執行 5/4 CSV 強制補帳", use_container_width=True):
+                # 確保從 4/30 之後開始抓
                 start_from = last_d + timedelta(days=1) if last_d else START_DATE
                 st.session_state.do_update = {"start": start_from, "reset": False}
-            if st.checkbox("重置資料庫") and st.button("🧨 全部重抓"):
+            if st.checkbox("危險：重置資料庫") and st.button("🧨 全部重抓"):
                 st.session_state.do_update = {"start": START_DATE, "reset": True}
 
-# ====================== 2. Grok 模式 CSV 下載邏輯 ======================
+# ====================== 2. 下載引擎 (暴力解析 CSV) ======================
 def is_trading_day(d):
     if d.weekday() >= 5: return False
+    # 2026/05/01 確定休市
     holidays = ["2026-01-01", "2026-01-28", "2026-02-27", "2026-04-03", "2026-04-06", "2026-05-01"]
     return d.strftime('%Y-%m-%d') not in holidays
 
-def download_t86_csv(date):
-    # 這就是您要求的 CSV 下載路徑
+def download_t86_csv_force(date):
     date_str = date.strftime('%Y%m%d')
     url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date_str}&selectType=ALLBUT0999"
-    
     try:
         resp = requests.get(url, headers={"User-Agent": random.choice(USER_AGENTS)}, timeout=30, verify=False)
-        # 排除休市或尚未更新的情況
-        if "查詢無資料" in resp.text or len(resp.text) < 500:
-            return None
+        if "查詢無資料" in resp.text: return None
         
-        # 模擬 Grok 解析：尋找包含證券代號的那一行作為標題
+        # 尋找數據起點
         lines = resp.text.splitlines()
-        data_start_idx = -1
-        for i, line in enumerate(lines):
-            if "證券代號" in line:
-                data_start_idx = i
+        header_idx = -1
+        for i, l in enumerate(lines):
+            if "證券代號" in l:
+                header_idx = i
                 break
+        if header_idx == -1: return None
         
-        if data_start_idx == -1: return None
+        # 暴力清理 CSV
+        clean_lines = [l for l in lines[header_idx:] if len(l.split(',')) > 10]
+        df = pd.read_csv(StringIO("\n".join(clean_lines)), encoding='big5', on_bad_lines='skip')
+        df.columns = [str(c).replace('"', '').strip() for c in df.columns]
         
-        # 讀取 CSV
-        clean_csv = "\n".join(lines[data_start_idx:])
-        df = pd.read_csv(StringIO(clean_csv), encoding='big5', on_bad_lines='skip')
-        
-        # 清理欄位名與數值
-        df.columns = [str(c).strip().replace('"', '') for c in df.columns]
+        # 尋找三大法人欄位
         buy_col = next((c for c in df.columns if "三大法人買賣超股數" in c), None)
-        
         if buy_col:
-            # 移除逗號並轉數字
+            # 強制轉換數字，移除逗號
             df['三大法人買賣超股數'] = df[buy_col].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce').fillna(0)
             df['日期'] = pd.to_datetime(date)
-            # 確保代號是乾淨的數字字串
             df['證券代號'] = df['證券代號'].astype(str).str.extract(r'(\d+)')[0]
             return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']].dropna(subset=['證券代號'])
-    except Exception as e:
-        return None
+    except: return None
 
 if "do_update" in st.session_state:
     task = st.session_state.do_update
@@ -101,17 +99,18 @@ if "do_update" in st.session_state:
         full_df = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame()
         p_bar = st.progress(0)
         for i, d in enumerate(dates_to_fetch):
-            day_df = download_t86_csv(d)
+            day_df = download_t86_csv_force(d)
             if day_df is not None:
                 full_df = pd.concat([full_df, day_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
                 full_df.to_parquet(DATA_FILE, index=False)
             p_bar.progress((i + 1) / len(dates_to_fetch))
-            time.sleep(2) # 增加延遲避免被證交所阻擋
+            time.sleep(1.5)
         
+        st.cache_data.clear() # 更新完畢強制清空緩存
         del st.session_state.do_update
         st.rerun()
 
-# ====================== 3. 畫面渲染 (欄位嚴格維持) ======================
+# ====================== 3. 畫面渲染 (欄位絕對不變) ======================
 st.header(f"📈 {mode}")
 
 if os.path.exists(DATA_FILE):
@@ -120,7 +119,7 @@ if os.path.exists(DATA_FILE):
     latest_db_date = main_db['日期'].max()
     
     if mode == "今日強勢戰報":
-        st.info(f"📊 數據日期：{latest_db_date.date()}")
+        st.info(f"📊 數據基準日：{latest_db_date.date()}")
         db_s = main_db.sort_values(['證券代號', '日期']).copy()
         db_s['買超正'] = db_s['三大法人買賣超股數'] > 0
         db_s['連續買超'] = db_s.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
@@ -129,75 +128,7 @@ if os.path.exists(DATA_FILE):
         today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
         pre_filter = today_data[today_data['買超張數'] >= 200].sort_values('買超張數', ascending=False).head(100)
 
-        with st.spinner("🚀 同步即時報價中..."):
+        with st.spinner("🚀 同步即時行情並優化排序..."):
             codes = pre_filter['證券代號'].tolist()
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
-            price_data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', progress=False)
-            res_today = []
-            for s in codes:
-                for suffix in [".TW", ".TWO"]:
-                    t = f"{s}{suffix}"
-                    if t in price_data.columns.levels[0]:
-                        p_df = price_data[t].dropna()
-                        if not p_df.empty:
-                            curr = round(float(p_df['Close'].iloc[-1]), 2)
-                            ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
-                            row = pre_filter[pre_filter['證券代號']==s].iloc[0]
-                            diff_pct = round(((curr - ma5) / ma5 * 100), 2)
-                            res_today.append({
-                                "代號": s, "名稱": row['證券名稱'], "買超張數": row['買超張數'],
-                                "現價": curr, "5日均價": ma5, 
-                                "價差%": f"{diff_pct}%",
-                                "連買": int(row['連續買超']), 
-                                "操盤建議": "🚀 第一天發動" if row['連續買超'] == 1 else "⏳ 籌碼鎖定中",
-                                "_sort": 0 if row['連續買超'] == 1 else 1
-                            })
-                            break
-            if res_today:
-                df_res = pd.DataFrame(res_today).sort_values(['_sort', '買超張數'], ascending=[True, False])
-                st.dataframe(df_res.drop(columns=['_sort']), use_container_width=True, hide_index=True)
-
-    elif mode == "籌碼週期分析":
-        st.info(f"📊 週期基準：{latest_db_date.date()}")
-        db_c = main_db.sort_values(['證券代號', '日期']).copy()
-        db_c['大買'] = db_c['三大法人買賣超股數'] > 30000 
-        db_c['連買計數'] = db_c.groupby('證券代號')['大買'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
-        
-        active = db_c[db_c['連買計數'] >= 2]['證券代號'].unique()
-        res_cycle = []
-        
-        with st.status("🔄 深度獲利分析...") as status:
-            codes = active[:150].tolist() 
-            if codes:
-                tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
-                p_data_c = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
-                for c in codes:
-                    s_data = db_c[db_c['證券代號'] == c].copy()
-                    for suf in [".TW", ".TWO"]:
-                        t = f"{c}{suf}"
-                        if t in p_data_c.columns.levels[0]:
-                            p_df = p_data_c[t].dropna()
-                            if not p_df.empty:
-                                curr = round(float(p_df['Close'].iloc[-1]), 2)
-                                ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
-                                avg_r = (p_df['High'] - p_df['Low']).tail(10).mean()
-                                last_c = s_data['連買計數'].iloc[-1]
-                                buy_pt = round(min(ma5, p_df['Low'].tail(3).min()), 2)
-                                sell_pt = round(curr + (avg_r * 1.6), 2)
-                                
-                                res_cycle.append({
-                                    "代號": c, "名稱": s_data['證券名稱'].iloc[0],
-                                    "現價": curr, "預期價差": round(sell_pt - curr, 2),
-                                    "建議買點": buy_pt, "預期賣點": sell_pt,
-                                    "今日狀態": "🟢 剛發動" if last_c <= 1 else f"⚪ 連買 {int(last_c)} 天",
-                                    "最佳買日": "🔥 就在今天" if last_c <= 1 else "⏳ 等待回測",
-                                    "_sort": 0 if last_c <= 1 else 1
-                                })
-                                break
-            status.update(label="✅ 分析完成", state="complete")
-        
-        if res_cycle:
-            df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '預期價差'], ascending=[True, False])
-            st.dataframe(df_cycle.drop(columns=['_sort']), use_container_width=True, hide_index=True)
-else:
-    st.warning("請執行補帳以更新 5/4 數據。")
+            price_data = yf.download(tickers, period="5d",
