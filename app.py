@@ -14,11 +14,9 @@ st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial
 
 DATA_FILE = os.path.join(os.getcwd(), "twse_db.parquet")
 USER_AGENTS = ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"]
-ADMIN_PASSWORD = "1023520"
 
 def is_trading_day(d):
     if d.weekday() >= 5: return False
-    # 勞動節範例，可依需求調整
     if d.strftime('%Y-%m-%d') == "2026-05-01": return False
     return True
 
@@ -86,9 +84,11 @@ if os.path.exists(DATA_FILE):
     
     if mode == "今日強勢戰報":
         st.info(f"📊 數據基準日：{latest_db_date.date()}")
+        # 關鍵：排序後計算，只針對有資料的日期(交易日)計算連續性
         db_s = main_db.sort_values(['證券代號', '日期']).copy()
         db_s['買超正'] = db_s['三大法人買賣超股數'] > 0
         db_s['連續買超'] = db_s.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+        
         today_data = db_s[db_s['日期'] == latest_db_date].copy()
         today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
         pre_filter = today_data[today_data['買超張數'] >= 200].sort_values('買超張數', ascending=False).head(100)
@@ -122,14 +122,18 @@ if os.path.exists(DATA_FILE):
 
     elif mode == "籌碼週期分析":
         st.info(f"📊 週期基準日：{latest_db_date.date()}")
+        # 關鍵：先按日期排序，確保計算連續天數時自動跳過無資料的假日
         db_c = main_db.sort_values(['證券代號', '日期']).copy()
         db_c['大買'] = db_c['三大法人買賣超股數'] > 3000000 
         db_c['連買計數'] = db_c.groupby('證券代號')['大買'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
-        active = db_c[db_c['連買計數'] >= 1]['證券代號'].unique()
-        res_cycle = []
         
+        # 只抓取基準日當天還有在連買的標的
+        active_today = db_c[db_c['日期'] == latest_db_date]
+        active_codes = active_today[active_today['連買計數'] >= 1]['證券代號'].unique()
+        
+        res_cycle = []
         with st.status("🔄 深度分析中...") as status:
-            codes = active[:150].tolist()
+            codes = active_codes[:150].tolist()
             if codes:
                 tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
                 p_data_c = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
@@ -143,20 +147,17 @@ if os.path.exists(DATA_FILE):
                                 curr = round(float(p_df['Close'].iloc[-1]), 2)
                                 ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
                                 avg_r = (p_df['High'] - p_df['Low']).tail(10).mean()
-                                last_c = s_data['連買計數'].iloc[-1]
+                                # 取得基準日當天的連買數值
+                                last_c = s_data[s_data['日期'] == latest_db_date]['連買計數'].iloc[0]
                                 buy_pt = round(min(ma5, p_df['Low'].tail(3).min()), 2)
                                 sell_pt = round(curr + (avg_r * 1.6), 2)
                                 
-                                # 保持原始欄位不動，精確插入「連買天數」於「今日狀態」前
                                 res_cycle.append({
-                                    "代號": c, 
-                                    "名稱": s_data['證券名稱'].iloc[0],
-                                    "現價": curr, 
-                                    "預期價差": round(sell_pt - curr, 2),
-                                    "建議買點": buy_pt, 
-                                    "預期賣點": sell_pt,
+                                    "代號": c, "名稱": s_data['證券名稱'].iloc[0],
+                                    "現價": curr, "預期價差": round(sell_pt - curr, 2),
+                                    "建議買點": buy_pt, "預期賣點": sell_pt,
                                     "現差": round(sell_pt - curr, 2),
-                                    "連買天數": int(last_c), # <-- 新增欄位
+                                    "連買天數": int(last_c),
                                     "今日狀態": "🟢 剛發動" if last_c <= 2 else f"⚪ 連買 {int(last_c)} 天",
                                     "最佳買日": "🔥 就在今天" if last_c <= 2 else "⏳ 等待回測",
                                     "_sort": 0 if last_c <= 2 else 1,
@@ -166,7 +167,6 @@ if os.path.exists(DATA_FILE):
             status.update(label="✅ 分析完成", state="complete")
         
         if res_cycle:
-            # 維持原本排序邏輯
             df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '_val'], ascending=[True, False])
             st.dataframe(df_cycle.drop(columns=['_sort', '_val']), use_container_width=True, hide_index=True)
 else:
