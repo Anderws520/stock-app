@@ -72,7 +72,7 @@ with st.sidebar:
                         db.to_parquet(DATA_FILE, index=False)
                     time.sleep(random.uniform(3, 5))
                 curr += timedelta(days=1)
-                p_bar.progress(1.0 if curr > today else 0.5)
+                p_bar.progress(min(1.0, (curr - start_point).days / ((today - start_point).days + 1)))
             st.rerun()
 
 # ====================== 2. 報表顯示 ======================
@@ -95,7 +95,6 @@ if os.path.exists(DATA_FILE):
         with st.spinner("🚀 同步即時報價中..."):
             codes = pre_filter['證券代號'].tolist()
             tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
-            # 修復 SyntaxError: 確保 yf.download 括號正確閉合
             price_data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', progress=False)
             res_today = []
             for s in codes:
@@ -117,6 +116,7 @@ if os.path.exists(DATA_FILE):
                             })
                             break
             if res_today:
+                # 維持今日戰報原本的排序：連買優先 + 買超張數
                 df_res = pd.DataFrame(res_today).sort_values(['_sort', '買超張數'], ascending=[True, False])
                 st.dataframe(df_res.drop(columns=['_sort']), use_container_width=True, hide_index=True)
 
@@ -125,6 +125,7 @@ if os.path.exists(DATA_FILE):
         db_c = main_db.sort_values(['證券代號', '日期']).copy()
         db_c['大買'] = db_c['三大法人買賣超股數'] > 3000000 
         db_c['連買計數'] = db_c.groupby('證券代號')['大買'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
+        # 篩選出有連買過的標的
         active = db_c[db_c['連買計數'] >= 1]['證券代號'].unique()
         res_cycle = []
         
@@ -151,16 +152,19 @@ if os.path.exists(DATA_FILE):
                                     "代號": c, "名稱": s_data['證券名稱'].iloc[0],
                                     "現價": curr, "預期價差": round(sell_pt - curr, 2),
                                     "建議買點": buy_pt, "預期賣點": sell_pt,
-                                    "現差": round(sell_pt - curr, 2), # 新增：現差欄位
+                                    "現差": round(sell_pt - curr, 2),
                                     "今日狀態": "🟢 剛發動" if last_c <= 2 else f"⚪ 連買 {int(last_c)} 天",
                                     "最佳買日": "🔥 就在今天" if last_c <= 2 else "⏳ 等待回測",
-                                    "_sort": 0 if last_c <= 2 else 1
+                                    "_sort": 0 if last_c <= 2 else 1,
+                                    "_val": round(sell_pt - curr, 2) # 用於輔助排序的數值
                                 })
                                 break
             status.update(label="✅ 分析完成", state="complete")
         
         if res_cycle:
-            df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '現差'], ascending=[True, False])
-            st.dataframe(df_cycle.drop(columns=['_sort']), use_container_width=True, hide_index=True)
+            # 修改排序邏輯回原本的：剛發動優先，其餘按價差空間降序
+            df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '_val'], ascending=[True, False])
+            # 移除輔助排序欄位後顯示
+            st.dataframe(df_cycle.drop(columns=['_sort', '_val']), use_container_width=True, hide_index=True)
 else:
     st.warning("請執行「自動續傳更新」以獲取資料。")
