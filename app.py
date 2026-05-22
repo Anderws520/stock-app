@@ -15,8 +15,7 @@ st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial
 DATA_FILE = os.path.join(os.getcwd(), "twse_db.parquet")
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
 
 def is_trading_day(d):
@@ -24,48 +23,42 @@ def is_trading_day(d):
     if d.strftime('%Y-%m-%d') == "2026-05-01": return False  # 勞動節
     return True
 
+def parse_t86_text(text_data, target_date):
+    """核心邏輯：負責將證交所原始CSV文字解析為DataFrame"""
+    try:
+        if "查詢無資料" in text_data: 
+            return "NODATA"
+        lines = text_data.splitlines()
+        header_idx = -1
+        for i, l in enumerate(lines):
+            if "證券代號" in l:
+                header_idx = i
+                break
+        if header_idx == -1: 
+            return None
+            
+        df = pd.read_csv(StringIO("\n".join(lines[header_idx:])), encoding='big5', on_bad_lines='skip')
+        df.columns = [str(c).replace('"', '').strip() for c in df.columns]
+        buy_col = next((c for c in df.columns if "三大法人買賣超股數" in c), None)
+        
+        if buy_col:
+            df['三大法人買賣超股數'] = df[buy_col].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce').fillna(0)
+            df['日期'] = pd.to_datetime(target_date)
+            df['證券代號'] = df['證券代號'].astype(str).str.extract(r'(\d+)')[0]
+            return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']].dropna(subset=['證券代號'])
+    except:
+        pass
+    return None
+
 def download_t86_csv(target_date):
     date_str = target_date.strftime('%Y%m%d')
     url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date_str}&selectType=ALLBUT0999"
-    
-    # 強化版重試機制：最多嘗試 3 次
-    for attempt in range(3):
-        try:
-            headers = {"User-Agent": random.choice(USER_AGENTS)}
-            # 將 timeout 拉長到 25 秒，防止證交所伺服器慢回應
-            resp = requests.get(url, headers=headers, timeout=25, verify=False)
-            
-            if "查詢無資料" in resp.text:
-                return "NODATA"  # 證交所明確回應當天沒資料（例如非預期的非交易日）
-                
-            if "證券代號" not in resp.text:
-                # 拿到的不是正確的 CSV（可能被實施訪問控制），等待後重試
-                time.sleep(random.uniform(3, 5))
-                continue
-                
-            lines = resp.text.splitlines()
-            header_idx = -1
-            for i, l in enumerate(lines):
-                if "證券代號" in l:
-                    header_idx = i
-                    break
-            if header_idx == -1: 
-                continue
-                
-            df = pd.read_csv(StringIO("\n".join(lines[header_idx:])), encoding='big5', on_bad_lines='skip')
-            df.columns = [str(c).replace('"', '').strip() for c in df.columns]
-            buy_col = next((c for c in df.columns if "三大法人買賣超股數" in c), None)
-            
-            if buy_col:
-                df['三大法人買賣超股數'] = df[buy_col].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce').fillna(0)
-                df['日期'] = pd.to_datetime(target_date)
-                df['證券代號'] = df['證券代號'].astype(str).str.extract(r'(\d+)')[0]
-                return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']].dropna(subset=['證券代號'])
-        except:
-            time.sleep(random.uniform(2, 4))
-            continue
-            
-    return None  # 三次都失敗（可能真的斷線或被鎖 IP）
+    try:
+        headers = {"User-Agent": random.choice(USER_AGENTS)}
+        resp = requests.get(url, headers=headers, timeout=20, verify=False)
+        return parse_t86_text(resp.text, target_date)
+    except:
+        return None
 
 # ====================== 側邊欄：更新與管理 ======================
 with st.sidebar:
@@ -83,47 +76,72 @@ with st.sidebar:
         except:
             st.error("📁 Parquet 資料庫檔案毀損，若持續無法更新請刪除舊檔重跑。")
 
-    if st.button("🔄 自動續傳更新", type="primary", use_container_width=True):
-        with st.container():
-            db = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame(columns=['日期', '證券代號', '證券名稱', '三大法人買賣超股數'])
-            start_point = (last_date + timedelta(days=1)) if last_date else datetime(2026, 4, 27).date()
-            today = datetime.now().date()
-            curr = start_point
-            
-            status_text = st.empty()
-            p_bar = st.progress(0)
-            total_days = (today - start_point).days + 1
-            
-            while curr <= today:
-                status_text.text(f"⏳ 正在下載原始資料: {curr}")
-                if is_trading_day(curr):
-                    day_df = download_t86_csv(curr)
-                    
-                    if isinstance(day_df, pd.DataFrame) and not day_df.empty:
-                        # 成功下載原始資料，寫入資料庫
-                        db = pd.concat([db, day_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
-                        db.to_parquet(DATA_FILE, index=False)
-                        st.toast(f"✅ {curr} 原始資料下載成功！")
-                        time.sleep(random.uniform(5, 8)) # 下載成功後穩健停頓，避免被鎖 IP
-                        curr += timedelta(days=1) # 成功了，前進下一天
-                    elif day_df == "NODATA":
-                        st.toast(f"ℹ️ {curr} 證交所確認無交易資料，跳過。")
-                        curr += timedelta(days=1) # 明確無資料，前進下一天
-                    else:
-                        # 這是關鍵：如果是 None（被擋或下載失敗），絕對不能直接跳過！
-                        # 我們要在這裡停頓久一點，然後不前進日期（curr不加1），下一次迴圈繼續重試這一天！
-                        st.error(f"❌ {curr} 原始資料下載失敗（可能遭限制連線）。將於 15 秒後自動重新嘗試抓取...")
-                        time.sleep(15) 
-                else:
-                    # 假日不需要下載，直接前進下一天
-                    curr += timedelta(days=1)
+    st.subheader("🔄 數據更新軌道")
+    update_method = st.radio("更新方式", ["1. 官方自動續傳", "2. 遭阻擋時手動貼上"], index=0)
+
+    if update_method == "1. 官方自動續傳":
+        if st.button("運行自動續傳", type="primary", use_container_width=True):
+            with st.container():
+                db = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame(columns=['日期', '證券代號', '證券名稱', '三大法人買賣超股數'])
+                start_point = (last_date + timedelta(days=1)) if last_date else datetime(2026, 4, 27).date()
+                today = datetime.now().date()
+                curr = start_point
                 
-                if total_days > 0:
-                    progress_val = min(1.0, (curr - start_point).days / total_days)
-                    p_bar.progress(progress_val)
+                status_text = st.empty()
+                p_bar = st.progress(0)
+                total_days = (today - start_point).days + 1
+                
+                while curr <= today:
+                    status_text.text(f"⏳ 正在下載原始資料: {curr}")
+                    if is_trading_day(curr):
+                        day_df = download_t86_csv(curr)
+                        
+                        if isinstance(day_df, pd.DataFrame) and not day_df.empty:
+                            db = pd.concat([db, day_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
+                            db.to_parquet(DATA_FILE, index=False)
+                            st.toast(f"✅ {curr} 原始資料下載成功！")
+                            time.sleep(random.uniform(5, 8))
+                            curr += timedelta(days=1)
+                        elif day_df == "NODATA":
+                            st.toast(f"ℹ️ {curr} 證交所確認無交易資料，跳過。")
+                            curr += timedelta(days=1)
+                        else:
+                            st.error(f"❌ {curr} 原始資料下載失敗（遭證交所限制連線）。請更換網路 IP 重試，或切換至右側「手動貼上」模式！")
+                            break
+                    else:
+                        curr += timedelta(days=1)
                     
-            status_text.text("✨ 原始資料續傳更新流程結束！")
-            st.rerun()
+                    if total_days > 0:
+                        progress_val = min(1.0, (curr - start_point).days / total_days)
+                        p_bar.progress(progress_val)
+                        
+                status_text.text("✨ 原始資料更新流程結束！")
+                st.rerun()
+
+    elif update_method == "2. 遭阻擋時手動貼上":
+        manual_date = st.date_input("要補原始資料的日期", value=(last_date + timedelta(days=1)) if last_date else datetime(2026, 4, 27).date())
+        m_date_str = manual_date.strftime('%Y%m%d')
+        st.markdown(f"**第一步：** [點我打開證交所 {manual_date} 原始網頁](https://www.twse.com.tw/fund/T86?response=csv&date={m_date_str}&selectType=ALLBUT0999)")
+        st.caption("ℹ️ 如果網頁打開有很多密密麻麻的文字，請全部複製。若顯示無資料或訪問控制，請用手機開啟網頁複製。")
+        
+        raw_text = st.text_area("**第二步：** 請在此處貼上剛才複製的全部文字")
+        
+        if st.button("第三步：強制手動寫入資料庫", type="inverse", use_container_width=True):
+            if raw_text.strip():
+                parsed_df = parse_t86_text(raw_text, manual_date)
+                if isinstance(parsed_df, pd.DataFrame) and not parsed_df.empty:
+                    db = pd.read_parquet(DATA_FILE) if os.path.exists(DATA_FILE) else pd.DataFrame(columns=['日期', '證券代號', '證券名稱', '三大法人買賣超股數'])
+                    db = pd.concat([db, parsed_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
+                    db.to_parquet(DATA_FILE, index=False)
+                    st.success(f"🔥 成功！已強制寫入 {manual_date} 的原始三大法人資料！")
+                    time.sleep(1)
+                    st.rerun()
+                elif parsed_df == "NODATA":
+                    st.warning("證交所文字顯示當天非交易日（無資料），不需寫入。")
+                else:
+                    st.error("解析失敗！請確認貼上的內容是否完整（需包含『證券代號』等字樣）。")
+            else:
+                st.error("請先貼上網頁內容再點擊寫入。")
 
 # ====================== 2. 報表顯示 ======================
 st.header(f"📈 {mode}")
@@ -221,4 +239,4 @@ if os.path.exists(DATA_FILE):
             df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '_val'], ascending=[True, False])
             st.dataframe(df_cycle.drop(columns=['_sort', '_val']), use_container_width=True, hide_index=True)
 else:
-    st.warning("請執行「自動續傳更新」以獲取資料。")
+    st.warning("請執行數據更新以獲取資料。")
