@@ -31,7 +31,7 @@ def get_stock_name_map(token=""):
     try:
         resp = requests.get(url, headers=headers, params=parameter, timeout=12)
         if resp.status_code == 200:
-            data = resp.json().get('data',)
+            data = resp.json().get('data', [])
             df = pd.DataFrame(data)
             if not df.empty and 'stock_id' in df.columns and 'stock_name' in df.columns:
                 return dict(zip(df['stock_id'].astype(str), df['stock_name']))
@@ -56,11 +56,11 @@ def download_t86_finmind(target_date, token=""):
         if resp.status_code == 403:
             st.error("🚫 FinMind API 回傳 403 拒絕存取！請確認您的 Token 是否正確，或免費每小時 600 次額度已用完。")
             return None
-        elif resp.status_code!= 200:
+        elif resp.status_code != 200:
             return None
         
         res_json = resp.json()
-        data = res_json.get('data',)
+        data = res_json.get('data', [])
         if not data:
             return None
         
@@ -132,7 +132,6 @@ with st.sidebar:
                     else:
                         status_text.text(f"ℹ️ {curr} 無交易數據或下載失敗，跳過。")
                     
-                    # API 串接不需向原網頁爬蟲般延遲 3 ~ 5 秒。設為 0.5 ~ 1.0 秒即可。
                     time.sleep(random.uniform(0.5, 1.0))
                 
                 curr += timedelta(days=1)
@@ -140,6 +139,7 @@ with st.sidebar:
                     p_bar.progress(min(1.0, (curr - start_point).days / total_days))
             
             status_text.text("🎉 自動續傳更新完成！")
+            time.sleep(1.5)
             st.rerun()
 
 # ====================== 3. 報表顯示與分析 ======================
@@ -154,25 +154,27 @@ if os.path.exists(DATA_FILE):
         st.info(f"📊 數據基準日：{latest_db_date.date()}")
         db_s = main_db.sort_values(['證券代號', '日期']).copy()
         db_s['買超正'] = db_s['三大法人買賣超股數'] > 0
-        db_s['連續買超'] = db_s.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x!= x.shift()).cumsum()).cumcount() + 1))
+        db_s['連續買超'] = db_s.groupby('證券代號')['買超正'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         today_data = db_s[db_s['日期'] == latest_db_date].copy()
         today_data['買超張數'] = (today_data['三大法人買賣超股數'] / 1000).round(1)
         pre_filter = today_data[today_data['買超張數'] >= 200].sort_values('買超張數', ascending=False).head(100)
 
         with st.spinner("🚀 同步即時報價中..."):
             codes = pre_filter['證券代號'].tolist()
-            tickers = +
+            # 修正了這裡被截斷的陣列宣告
+            tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
             price_data = yf.download(tickers, period="5d", interval="1d", group_by='ticker', progress=False)
-            res_today =
+            res_today = []
+            
             for s in codes:
-                for suffix in:
+                for suffix in [".TW", ".TWO"]:
                     t = f"{s}{suffix}"
-                    if t in price_data.columns.levels:
+                    if isinstance(price_data.columns, pd.MultiIndex) and t in price_data.columns.levels[0]:
                         p_df = price_data[t].dropna()
                         if not p_df.empty:
                             curr = round(float(p_df['Close'].iloc[-1]), 2)
                             ma5 = round(float(p_df['Close'].tail(5).mean()), 2)
-                            row = pre_filter[pre_filter['證券代號'] == s].iloc
+                            row = pre_filter[pre_filter['證券代號'] == s].iloc[0]
                             diff_pct = round(((curr - ma5) / ma5 * 100), 2)
                             res_today.append({
                                 "代號": s, "名稱": row['證券名稱'], "買超張數": row['買超張數'],
@@ -183,28 +185,29 @@ if os.path.exists(DATA_FILE):
                             })
                             break
             if res_today:
-                df_res = pd.DataFrame(res_today).sort_values(['_sort', '買超張數'], ascending=)
+                df_res = pd.DataFrame(res_today).sort_values(['_sort', '買超張數'], ascending=[True, False])
                 st.dataframe(df_res.drop(columns=['_sort']), use_container_width=True, hide_index=True)
 
     elif mode == "籌碼週期分析":
         st.info(f"📊 週期基準日：{latest_db_date.date()}")
         db_c = main_db.sort_values(['證券代號', '日期']).copy()
         db_c['大買'] = db_c['三大法人買賣超股數'] > 3000000 
-        db_c['連買計數'] = db_c.groupby('證券代號')['大買'].transform(lambda x: x * (x.groupby((x!= x.shift()).cumsum()).cumcount() + 1))
+        db_c['連買計數'] = db_c.groupby('證券代號')['大買'].transform(lambda x: x * (x.groupby((x != x.shift()).cumsum()).cumcount() + 1))
         # 篩選出有連買過的標的
         active = db_c[db_c['連買計數'] >= 1]['證券代號'].unique()
-        res_cycle =
+        res_cycle = []
         
         with st.status("🔄 深度分析中...") as status:
             codes = active[:150].tolist()
             if codes:
-                tickers = +
+                # 修正了這裡被截斷的陣列宣告
+                tickers = [f"{s}.TW" for s in codes] + [f"{s}.TWO" for s in codes]
                 p_data_c = yf.download(tickers, period="20d", interval="1d", group_by='ticker', progress=False)
                 for c in codes:
                     s_data = db_c[db_c['證券代號'] == c].copy()
-                    for suf in:
+                    for suf in [".TW", ".TWO"]:
                         t = f"{c}{suf}"
-                        if t in p_data_c.columns.levels:
+                        if isinstance(p_data_c.columns, pd.MultiIndex) and t in p_data_c.columns.levels[0]:
                             p_df = p_data_c[t].dropna()
                             if not p_df.empty:
                                 curr = round(float(p_df['Close'].iloc[-1]), 2)
@@ -215,20 +218,20 @@ if os.path.exists(DATA_FILE):
                                 sell_pt = round(curr + (avg_r * 1.6), 2)
                                 
                                 res_cycle.append({
-                                    "代號": c, "名稱": s_data['證券名稱'].iloc,
+                                    "代號": c, "名稱": s_data['證券名稱'].iloc[0],
                                     "現價": curr, "預期價差": round(sell_pt - curr, 2),
                                     "建議買點": buy_pt, "預期賣點": sell_pt,
                                     "現差": round(sell_pt - curr, 2),
                                     "今日狀態": "🟢 剛發動" if last_c <= 2 else f"⚪ 連買 {int(last_c)} 天",
                                     "最佳買日": "🔥 就在今天" if last_c <= 2 else "⏳ 等待回測",
                                     "_sort": 0 if last_c <= 2 else 1,
-                                    "_val": round(sell_pt - curr, 2) # 用於輔助排序的數值
+                                    "_val": round(sell_pt - curr, 2)
                                 })
                                 break
             status.update(label="✅ 分析完成", state="complete")
         
         if res_cycle:
-            df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '_val'], ascending=)
+            df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '_val'], ascending=[True, False])
             st.dataframe(df_cycle.drop(columns=['_sort', '_val']), use_container_width=True, hide_index=True)
 
     elif mode == "資料庫管理":
