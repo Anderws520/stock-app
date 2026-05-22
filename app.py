@@ -168,4 +168,3 @@ if os.path.exists(DATA_FILE):
             st.dataframe(df_cycle.drop(columns=['_sort', '_val']), use_container_width=True, hide_index=True)
 else:
     st.warning("請執行「自動續傳更新」以獲取資料。")
-原本是這樣喔不要改到其他設定喔
