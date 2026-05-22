@@ -5,7 +5,6 @@ import requests
 import random
 import time
 from datetime import datetime, timedelta
-from io import StringIO
 import os
 import yfinance as yf
 
@@ -14,7 +13,8 @@ st.set_page_config(page_title="台股法人操盤系統", layout="wide", initial
 
 DATA_FILE = os.path.join(os.getcwd(), "twse_db.parquet")
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 ]
 
 def is_trading_day(d):
@@ -22,47 +22,67 @@ def is_trading_day(d):
     if d.strftime('%Y-%m-%d') == "2026-05-01": return False  # 勞動節
     return True
 
-def download_t86_csv(target_date):
+def download_t86_json(target_date):
+    """Grok 經典穩健流：改用官方 JSON API，完美避開 CSV 亂碼與縮排錯位問題"""
     date_str = target_date.strftime('%Y%m%d')
-    url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date_str}&selectType=ALLBUT0999"
+    # 證交所三大法人日報表官方 JSON 接口
+    url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALLBUT0999&response=json"
     try:
         headers = {"User-Agent": random.choice(USER_AGENTS)}
         resp = requests.get(url, headers=headers, timeout=15, verify=False)
         
-        # 判斷是否為無交易日
-        if "查詢無資料" in resp.text or not resp.text.strip():
+        if resp.status_code != 200:
+            return "ERROR"
+            
+        res_json = resp.json()
+        
+        # 證交所回傳查無資料或狀態不對，視為非交易日
+        if "data" not in res_json or not res_json["data"] or res_json.get("stat") != "OK":
             return "SKIPPED"
             
-        # Grok 經典流暢解析：直接跳過第一行標題，由 Pandas 強大容錯讀取
-        df = pd.read_csv(StringIO(resp.text), skiprows=1, encoding='big5', on_bad_lines='skip')
+        fields = res_json.get("fields", [])
+        data_rows = res_json.get("data", [])
         
-        # 清洗欄位名稱
-        df.columns = [str(c).replace('"', '').strip() for c in df.columns]
+        # 將欄位名稱清洗
+        fields = [str(f).strip() for f in fields]
         
-        # 尋找關鍵欄位
-        buy_col = next((c for c in df.columns if "三大法人買賣超股數" in c or "買賣超股數" in c), None)
-        code_col = next((c for c in df.columns if "證券代號" in c), None)
-        name_col = next((c for c in df.columns if "證券名稱" in c), None)
+        # 尋找目標欄位索引
+        code_idx = next((i for i, f in enumerate(fields) if "證券代號" in f), None)
+        name_idx = next((i for i, f in enumerate(fields) if "證券名稱" in f), None)
+        buy_idx = next((i for i, f in enumerate(fields) if "三大法人買賣超股數" in f or "買賣超股數" in f), None)
         
-        if buy_col and code_col:
-            # 清理代號與數據
-            df['證券代號'] = df[code_col].astype(str).str.replace('"', '').str.strip()
-            df['證券代號'] = df['證券代號'].str.extract(r'(\d+)', expand=False) # 只留數字
-            
-            df['三大法人買賣超股數'] = df[buy_col].astype(str).str.replace(',', '').str.replace('"', '')
-            df['三大法人買賣超股數'] = pd.to_numeric(df['三大法人買賣超股數'], errors='coerce').fillna(0)
-            
-            df['證券名稱'] = df[name_col].astype(str).str.replace('"', '').str.strip() if name_col else "未知"
-            df['日期'] = pd.to_datetime(target_date)
-            
-            # 過濾乾淨的資料表返回
-            final_df = df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']].dropna(subset=['證券代號'])
-            if not final_df.empty:
-                return final_df
+        if code_idx is not None and buy_idx is not None:
+            parsed_records = []
+            for row in data_rows:
+                raw_code = str(row[code_idx]).strip()
+                # 只保留純數字的股票代號（過濾權證或特別股雜訊）
+                import re
+                code_match = re.search(r'\d+', raw_code)
+                if not code_match:
+                    continue
+                stock_code = code_match.group()
+                
+                stock_name = str(row[name_idx]).strip() if name_idx is not None else "未知"
+                
+                # 清理買超股數
+                raw_buy = str(row[buy_idx]).replace(',', '').strip()
+                try:
+                    buy_shares = float(raw_buy)
+                except:
+                    buy_shares = 0.0
+                    
+                parsed_records.append({
+                    "日期": pd.to_datetime(target_date),
+                    "證券代號": stock_code,
+                    "證券名稱": stock_name,
+                    "三大法人買賣超股數": buy_shares
+                })
+                
+            if parsed_records:
+                return pd.DataFrame(parsed_records)
     except Exception as e:
-        pass
-    
-    # 遇到任何解析、網路延遲或格式異常，一律判定為 SKIPPED 往下推進，避免卡死
+        return "ERROR"
+        
     return "SKIPPED"
 
 # ====================== 側邊欄：更新與管理 ======================
@@ -79,7 +99,7 @@ with st.sidebar:
                 last_date = pd.to_datetime(db_info['日期']).max().date()
                 st.success(f"📁 目前資料庫至：{last_date}")
         except:
-            st.error("📁 Parquet 資料庫檔案毀損。")
+            st.error("📁 Parquet 資料庫檔案損毀或不相容。")
 
     if st.button("🔄 自動續傳更新", type="primary", use_container_width=True):
         with st.container():
@@ -95,18 +115,24 @@ with st.sidebar:
             while curr <= today:
                 status_text.text(f"⏳ 正在同步日期: {curr}")
                 if is_trading_day(curr):
-                    day_df = download_t86_csv(curr)
+                    day_df = download_t86_json(curr)
                     
                     if isinstance(day_df, pd.DataFrame) and not day_df.empty:
                         db = pd.concat([db, day_df], ignore_index=True).drop_duplicates(subset=['日期', '證券代號'])
                         db.to_parquet(DATA_FILE, index=False)
-                        st.toast(f"✅ {curr} 更新完成")
-                        time.sleep(random.uniform(2, 4)) # 保持適當延遲保護機制
+                        st.toast(f"✅ {curr} 下載成功！")
+                        time.sleep(random.uniform(3, 5)) # 安全爬取間隔，防止被短暫封鎖
+                        curr += timedelta(days=1)
+                    elif day_df == "SKIPPED":
+                        st.toast(f"ℹ️ {curr} 證交所確認無交易資料（自動跳過）。")
+                        curr += timedelta(days=1)
                     else:
-                        # 無論是假日還是異常，直接跳過往下走，保持連貫不卡關
-                        st.toast(f"ℹ️ {curr} 跳過或無資料，繼續往前推進。")
+                        # 真正的 API 連線錯誤才留在原地重試，不會像之前一樣盲目滑過工作日
+                        st.toast(f"⚠️ {curr} 伺服器忙碌，5秒後重新嘗試抓取...")
+                        time.sleep(5)
+                else:
+                    curr += timedelta(days=1) # 假日不抓取，直接前進
                 
-                curr += timedelta(days=1)
                 if total_days > 0:
                     progress_val = min(1.0, (curr - start_point).days / total_days)
                     p_bar.progress(progress_val)
@@ -213,6 +239,6 @@ if os.path.exists(DATA_FILE):
                 df_cycle = pd.DataFrame(res_cycle).sort_values(['_sort', '_val'], ascending=[True, False])
                 st.dataframe(df_cycle.drop(columns=['_sort', '_val']), use_container_width=True, hide_index=True)
     else:
-        st.warning("資料庫檔案為空，請執行「自動續傳更新」。")
+        st.warning("資料庫內部無任何有效數據，請點擊「自動續傳更新」。")
 else:
-    st.warning("請執行「自動續傳更新」以獲取資料。")
+    st.warning("請執行「自動續傳更新」以獲取歷史原始資料。")
