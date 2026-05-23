@@ -9,7 +9,7 @@ import os
 
 st.set_page_config(page_title="台股法人工具", layout="wide")
 st.title("🟢 台股三大法人買超工具")
-st.markdown("**極簡穩定版** - 先確保能下載資料")
+st.markdown("**已修正 307 Redirect 問題**")
 
 DATA_FILE = "twse_db.parquet"
 
@@ -20,15 +20,30 @@ def is_trading_day(d):
 
 def download_t86(date):
     url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date.strftime('%Y%m%d')}&selectType=ALLBUT0999"
+    headers = {
+        "User-Agent": random.choice([
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+        ]),
+        "Accept": "text/csv, application/csv",
+        "Referer": "https://www.twse.com.tw/zh/page/trading/fund/T86.html"
+    }
+    
     try:
-        resp = requests.get(url, 
-                          headers={"User-Agent": random.choice(["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"])}, 
-                          timeout=20, verify=False)
+        # 允許自動跟隨重導向
+        resp = requests.get(url, headers=headers, timeout=20, verify=False, allow_redirects=True)
+        st.caption(f"{date} 狀態碼: {resp.status_code}")
+        
         if resp.status_code != 200:
             st.error(f"HTTP錯誤: {resp.status_code}")
             return None
             
-        lines = [line.strip() for line in resp.text.splitlines() if line.strip()]
+        text = resp.text
+        if len(text) < 1000:
+            st.warning(f"{date} 回應內容太短，可能被阻擋")
+            return None
+        
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         start_idx = next((i for i, line in enumerate(lines) if "證券代號" in line), None)
         if start_idx is None:
             st.error("找不到資料標頭")
@@ -49,11 +64,12 @@ def download_t86(date):
         
         st.success(f"✅ {date} 成功抓到 {len(df)} 筆資料")
         return df[['日期', '證券代號', '證券名稱', '三大法人買賣超股數']]
+        
     except Exception as e:
-        st.error(f"下載失敗: {str(e)}")
+        st.error(f"錯誤: {str(e)}")
         return None
 
-# ====================== 更新按鈕 ======================
+# ====================== 主更新功能 ======================
 if st.button("🔄 開始/繼續 更新資料（斷點續傳）", type="primary"):
     with st.spinner("正在更新資料..."):
         if os.path.exists(DATA_FILE):
@@ -84,11 +100,11 @@ if st.button("🔄 開始/繼續 更新資料（斷點續傳）", type="primary"
             progress.progress(min(count / 25, 1.0))
             target += timedelta(days=1)
             count += 1
-            time.sleep(6)
+            time.sleep(7)   # 增加間隔避免被擋
         
         st.success("更新完成！")
 
-# ====================== 顯示資料 ======================
+# ====================== 顯示 ======================
 if os.path.exists(DATA_FILE):
     db = pd.read_parquet(DATA_FILE)
     latest = pd.to_datetime(db['日期']).max().date()
@@ -101,6 +117,6 @@ if os.path.exists(DATA_FILE):
     st.dataframe(today_data.sort_values('買超張數', ascending=False).head(30)[['證券代號', '證券名稱', '買超張數']], 
                 use_container_width=True, hide_index=True)
 else:
-    st.info("請點擊上方按鈕開始下載資料")
+    st.info("請點擊上方按鈕開始下載")
 
-st.caption("這是極簡版，先確保能下載成功")
+st.caption("已增加 allow_redirects 與 Referer 防護")
