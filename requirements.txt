@@ -1,5 +1,6 @@
 streamlit
 pandas
-numpy
 requests
-yfinance
+gspread
+google-auth
+urllib3
