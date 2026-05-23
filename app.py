@@ -9,7 +9,7 @@ import os
 
 st.set_page_config(page_title="台股法人工具", layout="wide")
 st.title("🟢 台股三大法人買超工具")
-st.markdown("**已修正 307 Redirect 問題**")
+st.markdown("**已加強反爬蟲防護**")
 
 DATA_FILE = "twse_db.parquet"
 
@@ -20,27 +20,33 @@ def is_trading_day(d):
 
 def download_t86(date):
     url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date.strftime('%Y%m%d')}&selectType=ALLBUT0999"
+    
     headers = {
         "User-Agent": random.choice([
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
         ]),
-        "Accept": "text/csv, application/csv",
-        "Referer": "https://www.twse.com.tw/zh/page/trading/fund/T86.html"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Referer": "https://www.twse.com.tw/zh/page/trading/fund/T86.html",
+        "Origin": "https://www.twse.com.tw",
+        "Connection": "keep-alive"
     }
     
     try:
-        # 允許自動跟隨重導向
-        resp = requests.get(url, headers=headers, timeout=20, verify=False, allow_redirects=True)
+        # 允許重導向 + 增加延遲
+        resp = requests.get(url, headers=headers, timeout=25, verify=False, allow_redirects=True)
+        
         st.caption(f"{date} 狀態碼: {resp.status_code}")
         
         if resp.status_code != 200:
             st.error(f"HTTP錯誤: {resp.status_code}")
             return None
-            
+        
         text = resp.text
-        if len(text) < 1000:
-            st.warning(f"{date} 回應內容太短，可能被阻擋")
+        if len(text) < 2000:
+            st.warning(f"{date} 回應內容異常（太短）")
             return None
         
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -55,6 +61,7 @@ def download_t86(date):
         buy_col = next((col for col in df.columns if "三大法人買賣超股數" in col), None)
         if buy_col is None:
             st.error("找不到買賣超欄位")
+            st.write("可用欄位:", list(df.columns)[:10])
             return None
         
         df['三大法人買賣超股數'] = df[buy_col].astype(str).str.replace(',', '').apply(pd.to_numeric, errors='coerce').fillna(0)
@@ -69,7 +76,7 @@ def download_t86(date):
         st.error(f"錯誤: {str(e)}")
         return None
 
-# ====================== 主更新功能 ======================
+# ====================== 更新功能 ======================
 if st.button("🔄 開始/繼續 更新資料（斷點續傳）", type="primary"):
     with st.spinner("正在更新資料..."):
         if os.path.exists(DATA_FILE):
@@ -100,7 +107,7 @@ if st.button("🔄 開始/繼續 更新資料（斷點續傳）", type="primary"
             progress.progress(min(count / 25, 1.0))
             target += timedelta(days=1)
             count += 1
-            time.sleep(7)   # 增加間隔避免被擋
+            time.sleep(8)   # 增加等待時間
         
         st.success("更新完成！")
 
@@ -119,4 +126,4 @@ if os.path.exists(DATA_FILE):
 else:
     st.info("請點擊上方按鈕開始下載")
 
-st.caption("已增加 allow_redirects 與 Referer 防護")
+st.caption("已加強 User-Agent + Referer + 等待時間")
