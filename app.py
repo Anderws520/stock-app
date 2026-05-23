@@ -16,13 +16,20 @@ SHEET_ID = "1GjcN6DSFWwJG14bPyMW8aNUkE70Auz6BQFPJ9EGzR38"
 STOCK_SHEET = "stock_Sheet"
 
 TW_HOLIDAYS_2026 = {
-    datetime(2026, 1, 1).date(), datetime(2026, 1, 26).date(),
-    datetime(2026, 1, 27).date(), datetime(2026, 1, 28).date(),
-    datetime(2026, 1, 29).date(), datetime(2026, 1, 30).date(),
-    datetime(2026, 2, 28).date(), datetime(2026, 4, 3).date(),
-    datetime(2026, 4, 4).date(), datetime(2026, 5, 1).date(),
-    datetime(2026, 6, 19).date(), datetime(2026, 9, 27).date(),
-    datetime(2026, 10, 9).date(), datetime(2026, 10, 10).date(),
+    datetime(2026, 1, 1).date(),
+    datetime(2026, 1, 26).date(),
+    datetime(2026, 1, 27).date(),
+    datetime(2026, 1, 28).date(),
+    datetime(2026, 1, 29).date(),
+    datetime(2026, 1, 30).date(),
+    datetime(2026, 2, 28).date(),
+    datetime(2026, 4, 3).date(),
+    datetime(2026, 4, 4).date(),
+    datetime(2026, 5, 1).date(),
+    datetime(2026, 6, 19).date(),
+    datetime(2026, 9, 27).date(),
+    datetime(2026, 10, 9).date(),
+    datetime(2026, 10, 10).date(),
 }
 
 USER_AGENTS = [
@@ -34,7 +41,6 @@ USER_AGENTS = [
 COL_NAMES = ["日期", "股票代號", "股票名稱", "關鍵分點", "買超張數",
              "5日均價", "目前現價", "價差%", "出現天數", "超盤建議"]
 
-# ====================== Google Sheets（含快取避免 429）======================
 
 @st.cache_resource
 def get_gspread_client():
@@ -47,33 +53,34 @@ def get_gspread_client():
     )
     return gspread.authorize(creds)
 
+
 def get_worksheet(name):
     client = get_gspread_client()
     return client.open_by_key(SHEET_ID).worksheet(name)
 
-@st.cache_data(ttl=120)
+
+@st.cache_data(ttl=300)
 def load_stock_data():
-    """讀取 Sheet 資料，快取 2 分鐘避免 429"""
     try:
         ws = get_worksheet(STOCK_SHEET)
         data = ws.get_all_values()
         if len(data) <= 1:
             return pd.DataFrame()
-        df = pd.DataFrame(data[1:], columns=data[0])
-        return df
+        return pd.DataFrame(data[1:], columns=data[0])
     except Exception as e:
         st.error("讀取失敗：" + str(e))
         return pd.DataFrame()
 
-@st.cache_data(ttl=120)
+
+@st.cache_data(ttl=300)
 def get_existing_dates():
-    """取得已有日期，快取 2 分鐘"""
     try:
         ws = get_worksheet(STOCK_SHEET)
         vals = ws.col_values(1)
         return set(v for v in vals[1:] if v)
     except:
         return set()
+
 
 def append_rows_to_sheet(sheet_rows):
     try:
@@ -89,12 +96,12 @@ def append_rows_to_sheet(sheet_rows):
         st.error("寫入失敗：" + str(e))
         return False
 
-# ====================== 證交所下載 ======================
 
 def is_trading_day(d):
     if hasattr(d, 'date'):
         d = d.date()
     return d.weekday() < 5 and d not in TW_HOLIDAYS_2026
+
 
 def clean_num(s):
     s = str(s).strip().replace(',', '').replace('+', '')
@@ -103,26 +110,29 @@ def clean_num(s):
     except:
         return 0.0
 
+
 def download_twse(target_date):
     date_str = target_date.strftime('%Y%m%d')
-    url = ("https://www.twse.com.tw/fund/T86"
-           "?response=csv&date=" + date_str + "&selectType=ALLBUT0999")
+    url = "https://www.twse.com.tw/fund/T86?response=csv&date=" + date_str + "&selectType=ALLBUT0999"
     headers = {
         "User-Agent": random.choice(USER_AGENTS),
         "Referer": "https://www.twse.com.tw/zh/page/trading/fund/T86.html",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Cache-Control": "no-cache",
     }
     session = requests.Session()
     try:
         session.get(
             "https://www.twse.com.tw/zh/page/trading/fund/T86.html",
-            headers=headers, timeout=10, verify=False
+            headers=headers, timeout=10, verify=False, allow_redirects=True
         )
-        time.sleep(random.uniform(1.5, 2.5))
+        time.sleep(random.uniform(2.0, 3.5))
     except:
         pass
     try:
-        resp = session.get(url, headers=headers, timeout=20, verify=False)
+        resp = session.get(
+            url, headers=headers, timeout=25, verify=False, allow_redirects=True
+        )
         if resp.status_code != 200:
             return None, "HTTP " + str(resp.status_code)
         try:
@@ -151,8 +161,10 @@ def download_twse(target_date):
         if not data_lines:
             return None, "無有效資料列"
         csv_str = lines[header_idx] + '\n' + '\n'.join(data_lines)
-        df = pd.read_csv(io.StringIO(csv_str), dtype=str,
-                         na_values=['--', '-', ''], keep_default_na=False)
+        df = pd.read_csv(
+            io.StringIO(csv_str), dtype=str,
+            na_values=['--', '-', ''], keep_default_na=False
+        )
         df.columns = [c.strip().replace('"', '') for c in df.columns]
         net_col = next((c for c in df.columns if '三大法人' in c), None)
         code_col = next((c for c in df.columns if '代號' in c or '代碼' in c), None)
@@ -174,6 +186,7 @@ def download_twse(target_date):
     except Exception as e:
         return None, str(e)
 
+
 def build_sheet_rows(df_raw, date_str, existing_df, start_row):
     rows = []
     for _, row in df_raw.iterrows():
@@ -189,29 +202,31 @@ def build_sheet_rows(df_raw, date_str, existing_df, start_row):
         else:
             appear = 1
         if buy_qty > 1000 and appear <= 2:
-            suggest = "🔥 雙強初現"
+            suggest = "雙強初現"
         elif appear >= 3:
-            suggest = "🔒 法人鎖碼"
+            suggest = "法人鎖碼"
         elif appear == 1:
-            suggest = "🚀 首次發動"
+            suggest = "首次發動"
         else:
-            suggest = "⏳ 籌碼鎖定"
+            suggest = "籌碼鎖定"
         rn = start_row + len(rows)
+        f_ma5 = '=IFERROR(AVERAGE(INDEX(GOOGLEFINANCE("TPE:"&B' + str(rn) + ',"price",TODAY()-10,TODAY()),,2)),G' + str(rn) + ')'
+        f_price = '=IFERROR(GOOGLEFINANCE("TPE:"&B' + str(rn) + ',"price"),"")'
+        f_diff = '=IF(AND(N(G' + str(rn) + ')>0,N(F' + str(rn) + ')>0),(G' + str(rn) + '-F' + str(rn) + ')/F' + str(rn) + ',"")'
         rows.append([
             date_str,
             "'" + code,
             str(row['名稱']),
             "三大法人",
             buy_qty,
-            '=IFERROR(AVERAGE(INDEX(GOOGLEFINANCE("TPE:"&B' + str(rn) + ',"price",TODAY()-10,TODAY()),,2)),G' + str(rn) + ')',
-            '=IFERROR(GOOGLEFINANCE("TPE:"&B' + str(rn) + ',"price"),"")',
-            '=IF(AND(N(G' + str(rn) + ')>0,N(F' + str(rn) + ')>0),(G' + str(rn) + '-F' + str(rn) + ')/F' + str(rn) + ',"")',
+            f_ma5,
+            f_price,
+            f_diff,
             appear,
             suggest,
         ])
     return rows
 
-# ====================== 介面 ======================
 
 st.markdown("""
 <style>
@@ -224,14 +239,14 @@ st.markdown("""
 .hdr p { color: #8899aa; margin: 4px 0 0; font-size: .9rem; }
 </style>
 <div class="hdr">
-    <h1>📈 台股法人操盤系統</h1>
+    <h1>台股法人操盤系統</h1>
     <p>三大法人籌碼追蹤 · 均線防護策略 · Google Sheets 持久化儲存</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ── 側邊欄 ──
+
 with st.sidebar:
-    st.title("⚒️ 操盤工具箱")
+    st.title("操盤工具箱")
     mode = st.radio("功能切換", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"], index=0)
     st.markdown("---")
 
@@ -239,8 +254,8 @@ with st.sidebar:
         edates = get_existing_dates()
         valid = sorted([d for d in edates if d and len(d) > 5], reverse=True)
         if valid:
-            st.success("📁 最新：" + valid[0])
-            st.info("📊 共 " + str(len(valid)) + " 筆日期記錄")
+            st.success("最新：" + valid[0])
+            st.info("共 " + str(len(valid)) + " 筆日期記錄")
         else:
             st.warning("尚無資料")
     except Exception as e:
@@ -248,7 +263,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    if st.button("🔄 自動更新（斷點續傳）", type="primary", use_container_width=True):
+    if st.button("自動更新（斷點續傳）", type="primary", use_container_width=True):
         existing_dates = get_existing_dates()
         start_date = datetime(2026, 4, 27).date()
         today = datetime.now().date()
@@ -261,7 +276,7 @@ with st.sidebar:
             d += timedelta(days=1)
 
         if not missing:
-            st.success("✅ 資料已是最新！")
+            st.success("資料已是最新！")
         else:
             st.info("需補抓 " + str(len(missing)) + " 個交易日")
             prog = st.progress(0)
@@ -271,7 +286,7 @@ with st.sidebar:
 
             for i, target in enumerate(missing[:20]):
                 date_str = target.strftime('%Y/%m/%d')
-                status_box.info("⏳ 抓取 " + str(target) + "...")
+                status_box.info("抓取 " + str(target) + "...")
                 df_raw, msg = download_twse(target)
 
                 if df_raw is not None:
@@ -284,46 +299,45 @@ with st.sidebar:
                     if sheet_rows:
                         if append_rows_to_sheet(sheet_rows):
                             updated += 1
-                            status_box.success("✅ " + str(target) + " 成功（" + str(len(sheet_rows)) + " 檔）")
-                            existing_df = load_stock_data()
+                            status_box.success(str(target) + " 成功（" + str(len(sheet_rows)) + " 檔）")
+                            time.sleep(3)
                         else:
-                            status_box.error("❌ " + str(target) + " 寫入失敗")
+                            status_box.error(str(target) + " 寫入失敗")
                     else:
-                        status_box.warning("⚠️ " + str(target) + " 無符合條件標的（買超 < 500 張）")
+                        status_box.warning(str(target) + " 無符合條件標的（買超 < 500 張）")
                 else:
                     if '查詢無資料' in msg:
-                        status_box.warning("🏖️ " + str(target) + " 休市")
+                        status_box.warning(str(target) + " 休市")
                     else:
-                        status_box.error("❌ " + str(target) + "：" + msg)
+                        status_box.error(str(target) + "：" + msg)
 
                 prog.progress((i + 1) / len(missing[:20]))
                 if i < len(missing) - 1:
-                    time.sleep(random.uniform(5.5, 8.5))
+                    time.sleep(random.uniform(6.0, 9.0))
 
-            st.success("✅ 完成！更新 " + str(updated) + " 天")
+            st.success("完成！更新 " + str(updated) + " 天")
             time.sleep(1)
             st.rerun()
 
-# ── 主畫面 ──
-st.header("📊 " + mode)
 
-# ── 今日強勢戰報 ──
+st.header(mode)
+
 if mode == "今日強勢戰報":
     df = load_stock_data()
     if df.empty:
-        st.warning("⚠️ 尚無資料，請點左側「自動更新」下載資料。")
+        st.warning("尚無資料，請點左側「自動更新」下載資料。")
     else:
         df.columns = COL_NAMES[:len(df.columns)]
         latest_date = df["日期"].max()
         today_df = df[df["日期"] == latest_date].copy()
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("📅 最新日期", latest_date)
-        c2.metric("📋 總記錄筆數", len(df))
-        c3.metric("📈 今日標的數", len(today_df))
+        c1.metric("最新日期", latest_date)
+        c2.metric("總記錄筆數", len(df))
+        c3.metric("今日標的數", len(today_df))
 
         st.markdown("---")
-        st.subheader("🔥 " + latest_date + " 強勢標的（買超 ≥ 500 張）")
+        st.subheader(latest_date + " 強勢標的（買超 >= 500 張）")
 
         try:
             today_df["買超_n"] = pd.to_numeric(today_df["買超張數"], errors='coerce').fillna(0)
@@ -336,100 +350,88 @@ if mode == "今日強勢戰報":
 
         st.dataframe(today_df, use_container_width=True, hide_index=True)
 
-        with st.expander("📂 查看全部歷史資料"):
+        with st.expander("查看全部歷史資料"):
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-# ── 籌碼週期分析 ──
 elif mode == "籌碼週期分析":
     df = load_stock_data()
     if df.empty:
-        st.warning("⚠️ 尚無資料，請點左側「自動更新」下載資料。")
+        st.warning("尚無資料，請點左側「自動更新」下載資料。")
     else:
         df.columns = COL_NAMES[:len(df.columns)]
-
-        st.info("分析各股連續出現天數與籌碼集中趨勢")
-
-        # 轉換買超張數為數字
         df["買超_n"] = pd.to_numeric(df["買超張數"], errors='coerce').fillna(0)
         df["天數_n"] = pd.to_numeric(df["出現天數"], errors='coerce').fillna(0)
 
-        # 取最新一天每支股票的資料
         latest_date = df["日期"].max()
         today_df = df[df["日期"] == latest_date].copy()
 
-        # 統計指標
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("📅 基準日", latest_date)
-        lock = today_df[today_df["天數_n"] >= 3]
-        c2.metric("🔒 法人鎖碼（≥3天）", len(lock))
-        strong = today_df[today_df["買超_n"] >= 1000]
-        c3.metric("💪 大買超（≥1000張）", len(strong))
-        new_start = today_df[today_df["天數_n"] == 1]
-        c4.metric("🚀 首次發動", len(new_start))
+        c1.metric("基準日", latest_date)
+        c2.metric("法人鎖碼（>=3天）", len(today_df[today_df["天數_n"] >= 3]))
+        c3.metric("大買超（>=1000張）", len(today_df[today_df["買超_n"] >= 1000]))
+        c4.metric("首次發動", len(today_df[today_df["天數_n"] == 1]))
 
         st.markdown("---")
 
-        # 分頁顯示
-        tab1, tab2, tab3 = st.tabs(["🔒 法人鎖碼", "🔥 雙強初現", "🚀 首次發動"])
+        tab1, tab2, tab3 = st.tabs(["法人鎖碼", "雙強初現", "首次發動"])
 
         with tab1:
-            lock_df = today_df[today_df["天數_n"] >= 3].sort_values(
+            d1 = today_df[today_df["天數_n"] >= 3].sort_values(
                 by=["天數_n", "買超_n"], ascending=[False, False]
             ).drop(columns=["買超_n", "天數_n"])
-            if lock_df.empty:
+            if d1.empty:
                 st.info("今日無法人鎖碼標的")
             else:
-                st.caption("連續出現 ≥ 3 天，籌碼持續鎖定中")
-                st.dataframe(lock_df, use_container_width=True, hide_index=True)
+                st.caption("連續出現 >= 3 天，籌碼持續鎖定中")
+                st.dataframe(d1, use_container_width=True, hide_index=True)
 
         with tab2:
-            double_strong = today_df[
+            d2 = today_df[
                 (today_df["買超_n"] >= 1000) & (today_df["天數_n"] <= 2)
             ].sort_values(by="買超_n", ascending=False).drop(columns=["買超_n", "天數_n"])
-            if double_strong.empty:
+            if d2.empty:
                 st.info("今日無雙強初現標的")
             else:
-                st.caption("買超 ≥ 1000 張 且 出現天數 ≤ 2 天，剛剛起漲！")
-                st.dataframe(double_strong, use_container_width=True, hide_index=True)
+                st.caption("買超 >= 1000 張 且 出現天數 <= 2 天，剛剛起漲！")
+                st.dataframe(d2, use_container_width=True, hide_index=True)
 
         with tab3:
-            new_df = today_df[today_df["天數_n"] == 1].sort_values(
+            d3 = today_df[today_df["天數_n"] == 1].sort_values(
                 by="買超_n", ascending=False
             ).drop(columns=["買超_n", "天數_n"])
-            if new_df.empty:
+            if d3.empty:
                 st.info("今日無首次發動標的")
             else:
                 st.caption("今日首次出現，法人剛開始進場")
-                st.dataframe(new_df, use_container_width=True, hide_index=True)
+                st.dataframe(d3, use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        st.subheader("📊 各股連續天數排行")
+        st.subheader("各股連續天數排行 TOP 30")
         rank_df = today_df.sort_values(
             by=["天數_n", "買超_n"], ascending=[False, False]
         ).drop(columns=["買超_n", "天數_n"]).head(30)
         st.dataframe(rank_df, use_container_width=True, hide_index=True)
 
-# ── 資料庫管理 ──
 elif mode == "資料庫管理":
-    st.subheader("🔧 資料庫管理")
+    st.subheader("資料庫管理")
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("[📊 開啟 Google Sheet](https://docs.google.com/spreadsheets/d/" + SHEET_ID + ")")
-        if st.button("🧪 測試 Google Sheets 連線", use_container_width=True):
+        st.markdown("[開啟 Google Sheet](https://docs.google.com/spreadsheets/d/" + SHEET_ID + ")")
+        if st.button("測試 Google Sheets 連線", use_container_width=True):
             try:
                 ws = get_worksheet(STOCK_SHEET)
-                st.success("✅ 連線成功：" + ws.title)
+                st.success("連線成功：" + ws.title)
             except Exception as e:
-                st.error("❌ 連線失敗：" + str(e))
+                st.error("連線失敗：" + str(e))
 
     with col2:
         target_input = st.date_input(
             "手動補抓指定日期",
             value=datetime.now().date() - timedelta(days=1)
         )
-        if st.button("🚨 強制補抓此日期", use_container_width=True):
+        if st.button("強制補抓此日期", use_container_width=True):
             with st.spinner("抓取 " + str(target_input) + "..."):
                 df_raw, msg = download_twse(target_input)
                 if df_raw is not None:
@@ -443,17 +445,17 @@ elif mode == "資料庫管理":
                     sheet_rows = build_sheet_rows(df_raw, date_str, existing_df, start_row)
                     if sheet_rows:
                         if append_rows_to_sheet(sheet_rows):
-                            st.success("✅ 成功！" + str(len(sheet_rows)) + " 檔寫入完成")
+                            st.success("成功！" + str(len(sheet_rows)) + " 檔寫入完成")
                             st.rerun()
                         else:
                             st.error("寫入 Sheet 失敗")
                     else:
                         st.warning("無符合條件標的（買超 < 500 張）")
                 else:
-                    st.error("❌ " + msg)
+                    st.error(msg)
 
     st.markdown("---")
-    st.subheader("📋 Sheet 資料預覽（最新 50 筆）")
+    st.subheader("Sheet 資料預覽（最新 50 筆）")
     df_p = load_stock_data()
     if not df_p.empty:
         df_p.columns = COL_NAMES[:len(df_p.columns)]
