@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 
 st.set_page_config(page_title="台股法人操盤系統", page_icon="📈", layout="wide")
 
-SHEET_ID = st.secrets["SHEET_ID"]
+SHEET_ID = "1GjcN6DSFWwJG14bPyMW8aNUkE70Auz6BQFPJ9EGzR38"
 STOCK_SHEET = "stock_Sheet"
 
 TW_HOLIDAYS_2026 = {
