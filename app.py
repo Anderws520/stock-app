@@ -31,7 +31,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 
-# ====================== Google Sheets ======================
+COL_NAMES = ["日期", "股票代號", "股票名稱", "關鍵分點", "買超張數",
+             "5日均價", "目前現價", "價差%", "出現天數", "超盤建議"]
+
+# ====================== Google Sheets（含快取避免 429）======================
 
 @st.cache_resource
 def get_gspread_client():
@@ -48,18 +51,23 @@ def get_worksheet(name):
     client = get_gspread_client()
     return client.open_by_key(SHEET_ID).worksheet(name)
 
+@st.cache_data(ttl=120)
 def load_stock_data():
+    """讀取 Sheet 資料，快取 2 分鐘避免 429"""
     try:
         ws = get_worksheet(STOCK_SHEET)
         data = ws.get_all_values()
         if len(data) <= 1:
             return pd.DataFrame()
-        return pd.DataFrame(data[1:], columns=data[0])
+        df = pd.DataFrame(data[1:], columns=data[0])
+        return df
     except Exception as e:
         st.error("讀取失敗：" + str(e))
         return pd.DataFrame()
 
+@st.cache_data(ttl=120)
 def get_existing_dates():
+    """取得已有日期，快取 2 分鐘"""
     try:
         ws = get_worksheet(STOCK_SHEET)
         vals = ws.col_values(1)
@@ -72,9 +80,10 @@ def append_rows_to_sheet(sheet_rows):
         ws = get_worksheet(STOCK_SHEET)
         existing = ws.get_all_values()
         if len(existing) == 0:
-            ws.append_row(["日期", "股票代號", "股票名稱", "關鍵分點", "買超張數",
-                           "5日均價", "目前現價", "價差%", "出現天數", "超盤建議"])
+            ws.append_row(COL_NAMES)
         ws.append_rows(sheet_rows, value_input_option="USER_ENTERED")
+        load_stock_data.clear()
+        get_existing_dates.clear()
         return True
     except Exception as e:
         st.error("寫入失敗：" + str(e))
@@ -220,9 +229,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# ── 側邊欄 ──
 with st.sidebar:
     st.title("⚒️ 操盤工具箱")
-    mode = st.radio("功能切換", ["今日強勢戰報", "資料庫管理"], index=0)
+    mode = st.radio("功能切換", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"], index=0)
     st.markdown("---")
 
     try:
@@ -279,7 +289,7 @@ with st.sidebar:
                         else:
                             status_box.error("❌ " + str(target) + " 寫入失敗")
                     else:
-                        status_box.warning("⚠️ " + str(target) + " 無符合條件標的")
+                        status_box.warning("⚠️ " + str(target) + " 無符合條件標的（買超 < 500 張）")
                 else:
                     if '查詢無資料' in msg:
                         status_box.warning("🏖️ " + str(target) + " 休市")
@@ -297,9 +307,7 @@ with st.sidebar:
 # ── 主畫面 ──
 st.header("📊 " + mode)
 
-COL_NAMES = ["日期", "股票代號", "股票名稱", "關鍵分點", "買超張數",
-             "5日均價", "目前現價", "價差%", "出現天數", "超盤建議"]
-
+# ── 今日強勢戰報 ──
 if mode == "今日強勢戰報":
     df = load_stock_data()
     if df.empty:
@@ -331,6 +339,77 @@ if mode == "今日強勢戰報":
         with st.expander("📂 查看全部歷史資料"):
             st.dataframe(df, use_container_width=True, hide_index=True)
 
+# ── 籌碼週期分析 ──
+elif mode == "籌碼週期分析":
+    df = load_stock_data()
+    if df.empty:
+        st.warning("⚠️ 尚無資料，請點左側「自動更新」下載資料。")
+    else:
+        df.columns = COL_NAMES[:len(df.columns)]
+
+        st.info("分析各股連續出現天數與籌碼集中趨勢")
+
+        # 轉換買超張數為數字
+        df["買超_n"] = pd.to_numeric(df["買超張數"], errors='coerce').fillna(0)
+        df["天數_n"] = pd.to_numeric(df["出現天數"], errors='coerce').fillna(0)
+
+        # 取最新一天每支股票的資料
+        latest_date = df["日期"].max()
+        today_df = df[df["日期"] == latest_date].copy()
+
+        # 統計指標
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("📅 基準日", latest_date)
+        lock = today_df[today_df["天數_n"] >= 3]
+        c2.metric("🔒 法人鎖碼（≥3天）", len(lock))
+        strong = today_df[today_df["買超_n"] >= 1000]
+        c3.metric("💪 大買超（≥1000張）", len(strong))
+        new_start = today_df[today_df["天數_n"] == 1]
+        c4.metric("🚀 首次發動", len(new_start))
+
+        st.markdown("---")
+
+        # 分頁顯示
+        tab1, tab2, tab3 = st.tabs(["🔒 法人鎖碼", "🔥 雙強初現", "🚀 首次發動"])
+
+        with tab1:
+            lock_df = today_df[today_df["天數_n"] >= 3].sort_values(
+                by=["天數_n", "買超_n"], ascending=[False, False]
+            ).drop(columns=["買超_n", "天數_n"])
+            if lock_df.empty:
+                st.info("今日無法人鎖碼標的")
+            else:
+                st.caption("連續出現 ≥ 3 天，籌碼持續鎖定中")
+                st.dataframe(lock_df, use_container_width=True, hide_index=True)
+
+        with tab2:
+            double_strong = today_df[
+                (today_df["買超_n"] >= 1000) & (today_df["天數_n"] <= 2)
+            ].sort_values(by="買超_n", ascending=False).drop(columns=["買超_n", "天數_n"])
+            if double_strong.empty:
+                st.info("今日無雙強初現標的")
+            else:
+                st.caption("買超 ≥ 1000 張 且 出現天數 ≤ 2 天，剛剛起漲！")
+                st.dataframe(double_strong, use_container_width=True, hide_index=True)
+
+        with tab3:
+            new_df = today_df[today_df["天數_n"] == 1].sort_values(
+                by="買超_n", ascending=False
+            ).drop(columns=["買超_n", "天數_n"])
+            if new_df.empty:
+                st.info("今日無首次發動標的")
+            else:
+                st.caption("今日首次出現，法人剛開始進場")
+                st.dataframe(new_df, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("📊 各股連續天數排行")
+        rank_df = today_df.sort_values(
+            by=["天數_n", "買超_n"], ascending=[False, False]
+        ).drop(columns=["買超_n", "天數_n"]).head(30)
+        st.dataframe(rank_df, use_container_width=True, hide_index=True)
+
+# ── 資料庫管理 ──
 elif mode == "資料庫管理":
     st.subheader("🔧 資料庫管理")
 
