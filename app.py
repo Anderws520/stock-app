@@ -42,6 +42,18 @@ def load_stock_data():
         data = ws.get_all_values()
         if len(data) <= 1:
             return pd.DataFrame()
+        headers = data[0]
+        rows = data[1:]
+        df = pd.DataFrame(rows, columns=headers)
+        needed = ["日期", "股票代號", "股票名稱", "關鍵分點", "買超張數",
+                  "5日均僳", "目前現僳", "僳差%", "出現天數", "超盤建議"]
+        existing = [c for c in needed if c in df.columns]
+        if existing:
+            df = df[existing]
+        return df
+    except Exception as e:
+        st.error("讀取失敗：" + str(e))
+        return pd.DataFrame()
         return pd.DataFrame(data[1:], columns=data[0])
     except Exception as e:
         st.error("讀取失敗：" + str(e))
@@ -141,7 +153,6 @@ if mode == "今日強勢戰報":
     if df.empty:
         st.warning("尚無資料，請點左側「自動補抓缺失資料」。")
     else:
-        df.columns = COL_NAMES[:len(df.columns)]
         latest_date = df["日期"].max()
         today_df = df[df["日期"] == latest_date].copy()
 
@@ -172,7 +183,6 @@ elif mode == "籌碼週期分析":
     if df.empty:
         st.warning("尚無資料，請點左側「自動補抓缺失資料」。")
     else:
-        df.columns = COL_NAMES[:len(df.columns)]
         df["買超_n"] = pd.to_numeric(df["買超張數"], errors='coerce').fillna(0)
         df["天數_n"] = pd.to_numeric(df["出現天數"], errors='coerce').fillna(0)
 
@@ -259,7 +269,6 @@ elif mode == "資料庫管理":
     st.subheader("Sheet 資料預覽（最新 50 筆）")
     df_p = load_stock_data()
     if not df_p.empty:
-        df_p.columns = COL_NAMES[:len(df_p.columns)]
         st.dataframe(df_p.tail(50), use_container_width=True, hide_index=True)
     else:
         st.info("尚無資料")
