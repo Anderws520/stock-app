@@ -44,7 +44,6 @@ def load_stock_data():
         rows = data[1:]
         df = pd.DataFrame(rows, columns=headers)
         
-        # 🎯 精準對齊全新的 13 個 GAS 黃金欄位名稱，徹底排除錯字
         needed = [
             "日期", "股票代號", "股票名稱", "法人買超(張)", "目前現價", 
             "5日均價(MA5)", "建議買價", "預估目標價", "價差%", 
@@ -54,6 +53,13 @@ def load_stock_data():
         existing = [c for c in needed if c in df.columns]
         if existing:
             df = df[existing]
+            
+        # 🎯 核心修正：強制把這幾個欄位轉為 Python 數字型態，否則格式化會失效
+        num_cols = ["法人買超(張)", "目前現價", "5日均價(MA5)", "建議買價", "預估目標價", "價差%", "連續發動天數"]
+        for col in num_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                
         return df
     except Exception as e:
         st.error("讀取失敗：" + str(e))
@@ -96,7 +102,6 @@ st.markdown("""
 }
 .hdr h3 { color: #00d4ff; margin: 0; display: inline-block; font-size: 1.2rem; }
 .hdr span { color: #8899aa; margin-left: 15px; font-size: .85rem; }
-/* 移除 Streamlit 預設的上邊距，讓表格升到最高 */
 .block-container { padding-top: 1.5rem !important; padding-bottom: 1rem !important; }
 </style>
 <div class="hdr">
@@ -110,7 +115,6 @@ st.markdown("""
 with st.sidebar:
     st.subheader("📊 系統狀態與統計")
     
-    # 讀取資料供狀態欄與主畫面使用
     df = load_stock_data()
     
     try:
@@ -120,7 +124,6 @@ with st.sidebar:
             latest_date = df["日期"].max()
             today_df = df[df["日期"] == latest_date].copy()
             
-            # 將原本佔據大版面的數據卡片，精簡縮小到側邊欄
             st.metric("最新交易日期", latest_date)
             st.metric("今日篩選標的數", f"{len(today_df)} 檔")
             st.metric("資料庫總記錄筆數", f"{len(df)} 筆")
@@ -141,10 +144,8 @@ with st.sidebar:
     if st.button("自動補抓缺失資料", type="primary", use_container_width=True):
         with st.spinner("正在通知 Apps Script 補抓資料..."):
             ok, msg = trigger_gas("backfill")
-            if ok:
-                st.success("補抓指令已送出！")
-            else:
-                st.warning("指令已送出（逾時不代表失敗）")
+            if ok: st.success("補抓指令已送出！")
+            else: st.warning("指令已送出（逾時不代表失敗）")
 
     if st.button("重新整理資料", use_container_width=True):
         load_stock_data.clear()
@@ -153,7 +154,21 @@ with st.sidebar:
         time.sleep(0.5)
         st.rerun()
 
-    st.caption("每天下午 5 點自動更新，或手動點擊上方按鈕")
+
+# 🎯 統一配置表格顯示樣式（包含百分比格式化與數值優化）
+GRID_CONFIG = {
+    "日期": st.column_config.TextColumn("日期", width="small"),
+    "股票代號": st.column_config.TextColumn("代號", width="small"),
+    "股票名稱": st.column_config.TextColumn("名稱", width="small"),
+    "法人買超(張)": st.column_config.NumberColumn("法人買超(張)", format="%d"),
+    "目前現價": st.column_config.NumberColumn("目前現價", format="%.2f"),
+    "5日均價(MA5)": st.column_config.NumberColumn("5日均價", format="%.2f"),
+    "建議買價": st.column_config.NumberColumn("建議買價", format="%.2f"),
+    "預估目標價": st.column_config.NumberColumn("預估目標價", format="%.2f"),
+    # 🔥 這裡最關鍵：直接把 0.02 格式化成 2.00%，並加上進度條特效
+    "價差%": st.column_config.NumberColumn("價差%", format="%.2f%%", help="現價距離MA5的乖離率", min_value=-0.2, max_value=0.2, step=0.01),
+    "連續發動天數": st.column_config.NumberColumn("天數", format="%d"),
+}
 
 
 # ====================== ── 主畫面：聚焦詳細資料 ── ======================
@@ -161,9 +176,9 @@ with st.sidebar:
 if df.empty:
     st.warning("尚無資料，請點左側「自動補抓缺失資料」按鈕。")
 else:
-    # 預先處理數值轉換，避免排序噴錯
-    df["買超_n"] = pd.to_numeric(df["法人買超(張)"], errors='coerce').fillna(0)
-    df["天數_n"] = pd.to_numeric(df["連續發動天數"], errors='coerce').fillna(0)
+    # 建立輔助排序欄位
+    df["買超_n"] = df["法人買超(張)"].fillna(0)
+    df["天數_n"] = df["連續發動天數"].fillna(0)
     
     if latest_date:
         today_df = df[df["日期"] == latest_date].copy()
@@ -172,23 +187,23 @@ else:
     if mode == "今日強勢戰報":
         st.subheader(f"📅 {latest_date} 詳細標的清單 (買超 >= 500張)", anchor=False)
         
-        # 依連續天數、買超張數降序排序
         if not today_df.empty:
-            today_df = today_df.sort_values(
-                by=["天數_n", "買超_n"], ascending=[False, False]
-            ).drop(columns=["買超_n", "天數_n"])
+            today_df = today_df.sort_values(by=["天數_n", "買超_n"], ascending=[False, False])
         
-        # 🎯 核心：直接展現超大滿版詳細資料表格
-        st.dataframe(today_df, use_container_width=True, hide_index=True, height=550)
+        # 移除排序輔助欄位
+        display_df = today_df.drop(columns=["買超_n", "天數_n"])
+        
+        # 使用配置檔渲染滿版大表格
+        st.dataframe(display_df, use_container_width=True, hide_index=True, height=580, column_config=GRID_CONFIG)
 
         with st.expander("🔍 查看歷史完整資料庫明細"):
-            st.dataframe(df.sort_values(by=["日期", "天數_n"], ascending=[False, False]).drop(columns=["買超_n", "天數_n"]), use_container_width=True, hide_index=True)
+            hist_df = df.sort_values(by=["日期", "天數_n"], ascending=[False, False]).drop(columns=["買超_n", "天數_n"])
+            st.dataframe(hist_df, use_container_width=True, hide_index=True, column_config=GRID_CONFIG)
 
     # ── 功能二：籌碼週期分析 ──
     elif mode == "籌碼週期分析":
         st.subheader(f"🎯 籌碼多週期篩選明細 ({latest_date})", anchor=False)
         
-        # 小指標區
         c1, c2, c3 = st.columns(3)
         c1.markdown(f"**🔥 法人鎖碼 (>=3天)：** `{len(today_df[today_df['天數_n'] >= 3])}` 檔")
         c2.markdown(f"**💪 大主力買超 (>=1000張)：** `{len(today_df[today_df['買超_n'] >= 1000])}` 檔")
@@ -199,22 +214,22 @@ else:
         with tab1:
             d1 = today_df[today_df["天數_n"] >= 3].sort_values(by=["天數_n", "買超_n"], ascending=[False, False]).drop(columns=["買超_n", "天數_n"])
             if d1.empty: st.info("今日無法人持續鎖碼標的")
-            else: st.dataframe(d1, use_container_width=True, hide_index=True, height=450)
+            else: st.dataframe(d1, use_container_width=True, hide_index=True, height=480, column_config=GRID_CONFIG)
 
         with tab2:
             d2 = today_df[(today_df["買超_n"] >= 1000) & (today_df["天數_n"] <= 2)].sort_values(by="買超_n", ascending=False).drop(columns=["買超_n", "天數_n"])
             if d2.empty: st.info("今日無雙強初現標的")
-            else: st.dataframe(d2, use_container_width=True, hide_index=True, height=450)
+            else: st.dataframe(d2, use_container_width=True, hide_index=True, height=480, column_config=GRID_CONFIG)
 
         with tab3:
             d3 = today_df[today_df["天數_n"] == 1].sort_values(by="買超_n", ascending=False).drop(columns=["買超_n", "天數_n"])
             if d3.empty: st.info("今日無新發動標的")
-            else: st.dataframe(d3, use_container_width=True, hide_index=True, height=450)
+            else: st.dataframe(d3, use_container_width=True, hide_index=True, height=480, column_config=GRID_CONFIG)
 
         st.markdown("---")
         st.subheader("📈 全市場連續發動天數強勢榜 TOP 30", anchor=False)
         rank_df = today_df.sort_values(by=["天數_n", "買超_n"], ascending=[False, False]).drop(columns=["買超_n", "天數_n"]).head(30)
-        st.dataframe(rank_df, use_container_width=True, hide_index=True)
+        st.dataframe(rank_df, use_container_width=True, hide_index=True, column_config=GRID_CONFIG)
 
     # ── 功能三：資料庫管理 ──
     elif mode == "資料庫管理":
@@ -240,4 +255,4 @@ else:
 
         st.markdown("---")
         st.subheader("📋 雲端資料庫最新 50 筆原始紀錄流水帳", anchor=False)
-        st.dataframe(df.tail(50), use_container_width=True, hide_index=True)
+        st.dataframe(df.tail(50), use_container_width=True, hide_index=True, column_config=GRID_CONFIG)
