@@ -4,53 +4,45 @@ import pandas as pd
 st.set_page_config(layout="wide")
 st.title("📊 三大法人籌碼監控儀表板")
 
-# ==========================================
-# 🟢 請在此處貼上你最原本、100% 確定能成功連線的網址
-# ==========================================
+# =======================================================
+# 🟢 唯一要改的地方：請把下面這行引號內的網址，換成你最原本確定能動的網址
+# =======================================================
 DATA_URL = "https://docs.google.com/spreadsheets/d/e/xxxx/pub?output=csv"
 
+# 用最乾淨、沒有任何判斷式的方式直接讀取網址
 try:
-    if "json" in DATA_URL.lower() or "exec" in DATA_URL:
-        df = pd.read_json(DATA_URL)
-    else:
-        df = pd.read_csv(DATA_URL)
+    df = pd.read_csv(DATA_URL)
 except Exception as e:
-    st.error(f"❌ 讀取雲端資料失敗，請確認網址。錯誤訊息: {e}")
+    st.error(f"❌ 讀取雲端資料失敗，請檢查網址。錯誤訊息: {e}")
     st.stop()
-# ==========================================
+
+# =======================================================
 
 if df is not None and not df.empty:
-    # 清理欄位前後的多餘空白，防止程式找不到欄位
+    # 清理欄位名稱空白
     df.columns = [str(c).strip() for c in df.columns]
     
     try:
-        # 1. 處理法人買超張數：轉成數字並加上千分位逗號（例如 77,652）
+        # 1. 把法人買超數字加上千分位逗號（看起來比較舒服）
         if "法人買超(張)" in df.columns:
-            df["買超張數_純數字"] = pd.to_numeric(df["法人買超(張)"], errors='coerce').fillna(0)
-        elif "買超張數" in df.columns:
-            df["買超張數_純數字"] = pd.to_numeric(df["買超張數"], errors='coerce').fillna(0)
+            df["買超數字"] = pd.to_numeric(df["法人買超(張)"], errors='coerce').fillna(0)
+            df["法人買超(張)"] = df["買超數字"].apply(lambda x: f"{x:,.0f}")
         else:
-            df["買超張數_純數字"] = 0
-        df["法人買超(張)"] = df["買超張數_純數字"].apply(lambda x: f"{x:,.0f}")
+            df["買超數字"] = 0
 
-        # 2. 處理 5日均價 與 目前現價 的欄位對齊
         ma5_col = "5日均價(MA5)" if "5日均價(MA5)" in df.columns else "5日均價"
-        
-        # 3. 確保股票代號呈現乾淨文字（去掉可能的小數點）
-        if "股票代號" in df.columns:
-            df["股票代號"] = df["股票代號"].astype(str).str.split('.').str[0].str.replace("'", "").str.strip()
 
-        # 4. 鎖定最新交易日
-        latest_date = df["日期"].iloc[0] if "日期" in df.columns else "最新交易日"
+        # 2. 鎖定最新交易日
+        latest_date = df["日期"].iloc[0] if "日期" in df.columns else "監控清單"
         if "日期" in df.columns:
             today_df = df[df["日期"] == latest_date].copy()
         else:
             today_df = df.copy()
 
-        # 5. 依據法人買超張數進行前 3 名排序 (Top 3)
-        top3 = today_df.sort_values(by="買超張數_純數字", ascending=False).head(3).copy()
+        # 3. 自動挑出買超前 3 名 (Top 3)
+        top3 = today_df.sort_values(by="買超數字", ascending=False).head(3).copy()
 
-        # --- 渲染網頁畫面 ---
+        # --- 畫面呈現 ---
         st.markdown(f"### 📅 當前監控交易日：{latest_date}")
         
         # ----- TOP 3 區塊 -----
