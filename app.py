@@ -1,124 +1,113 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-import numpy as np
 
-# 設定網頁標題與基本配置
-st.set_page_config(page_title="三大法人籌碼監控儀表板", page_icon="📈", layout="wide")
+# 設置網頁標題與基本配置
+st.set_page_config(
+    page_title="三大法人籌碼監控儀表板",
+    page_icon="📊",
+    layout="wide"
+)
 
-# ====================================================================
-# 1. 讀取 Google Sheets 資料 (此處請保留你原本的連線與讀取方式)
-# ====================================================================
-# 範例：df = conn.read(...) 或 df = pd.read_csv(url)
-# 這裡為了展示完整邏輯，假設讀進來的 DataFrame 叫 raw_df
+st.title("📊 三大法人籌碼監控儀表板")
+st.caption("自動化法人大戶籌碼追蹤系統 - 資料即時同步自 Google Sheets")
 
-# 防呆：確保讀進來有資料，並清除欄位前後的空白字元
-if 'raw_df' in locals() or 'df' in locals():
-    # 統一將變數名稱指向 df
-    if 'raw_df' in locals():
-        df = raw_df.copy()
-else:
-    # 這行是讀取示意，請替換成你原本專案中實際讀取 Google Sheets 的程式碼
-    # df = conn.read(ttl="5m") 
-    st.warning("⚠️ 請確保此處已正確接入你的 Google Sheets 資料來源。")
+# ==========================================
+# 1. 建立 Google Sheets 連線並讀取資料
+# ==========================================
+try:
+    # 建立 gsheets 連線物件
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    
+    # 讀取指定的工作表 stock_Sheet，並設定不使用快取以利資料即時更新
+    df = conn.read(worksheet="stock_Sheet", ttl=0)
+    
+except Exception as e:
+    st.error(f"❌ 無法連線至 Google Sheets 資料來源: {e}")
+    st.info("請檢查專案目錄下的 `.streamlit/secrets.toml` 是否已正確設定 Google Sheets 的共用連結 (spreadsheet_url)。")
     st.stop()
 
-# 強制將所有欄位名稱轉字串並清除隱形空白
-df.columns = [str(c).strip() for c in df.columns]
-
-# ====================================================================
-# 2. 資料清洗與型態轉換 (徹底根除 KeyError 與排序錯誤)
-# ====================================================================
-try:
-    # 確保數值欄位不會因為文字或逗號導致無法排序
-    df["買超張數"] = pd.to_numeric(df["買超張數"].astype(str).str.replace(',', ''), errors='coerce')
-    df["目前現價"] = pd.to_numeric(df["目前現價"].astype(str).str.replace(',', ''), errors='coerce')
-    df["5日均價"] = pd.to_numeric(df["5日均價"].astype(str).str.replace(',', ''), errors='coerce')
-    df["出現天數"] = pd.to_numeric(df["出現天數"], errors='coerce').fillna(1).astype(int)
+# ==========================================
+# 2. 終極防呆驗證與資料清洗機制
+# ==========================================
+if df is None or df.empty:
+    st.warning("⚠️ 順利連線，但目前 `stock_Sheet` 工作表內沒有任何資料。")
+    st.info("請先至 Google Apps Script (GAS) 編輯器中執行一次 'backfillHistory' 函數來匯入資料。")
+else:
+    # 2.1 強制清理欄位名稱（去除任何隱形空白、換行符，確保與 GAS 完全對齊）
+    df.columns = [str(c).strip() for c in df.columns]
     
-    # 處理價差%，若有 % 符號先拿掉再除以 100
-    if "價差%" in df.columns:
-        df["價差%"] = df["價差%"].astype(str).str.replace('%', '')
-        df["價差%"] = pd.to_numeric(df["價差%"], errors='coerce')
-        # 如果數字大於 1，代表原本是 6.00 這種格式，自動轉為 0.06
-        df["價差%"] = np.where(df["價差%"] > 1, df["價差%"] / 100, df["價差%"])
-
-    # 確保股票代號格式乾淨（去除單引號）
-    df["股票代號"] = df["股票代號"].astype(str).str.replace("'", "")
-
-    # ====================================================================
-    # 3. 籌碼資料篩選邏輯
-    # ====================================================================
-    # 取得最新的一天日期
-    if not df.empty:
-        latest_date = df["日期"].iloc[0]
-    else:
-        latest_date = "暫無資料"
-
-    # 篩選出今天最新日期的所有標的
-    today_df = df[df["日期"] == latest_date].copy()
+    # 2.2 檢查我們所需的關鍵欄位是否存在
+    required_cols = ["日期", "股票代號", "股票名稱", "法人買超(張)", "目前現價", "5日均價(MA5)", "推薦等級", "操盤建議"]
+    missing_cols = [col for col in required_cols if col not in df.columns]
     
-    # 計算畫面上方顯示的個股統計數量
-    total_count = len(today_df)
-
-    # 篩選出要放進 Top 3 的精選標的
-    # 對齊你舊試算表中的「超盤建議」（J欄或M欄中包含"強烈推"、"關注"或"今天就是最佳"等字眼）
-    if "超盤建議" in today_df.columns:
-        # 防呆：先轉字串再篩選
-        today_df["超盤建議"] = today_df["超盤建議"].astype(str)
-        filtered_for_top3 = today_df[today_df["超盤建議"].str.contains("強烈推|關注|最佳", na=False)].copy()
+    if missing_cols:
+        st.error(f"❌ 試算表欄位不匹配！目前缺少關鍵欄位: {missing_cols}")
+        st.info("這通常是因為試算表內存在錯位表頭。請將 Google Sheets 的 `stock_Sheet` 分頁手動刪除，然後去 GAS 點選執行 'backfillHistory' 重新建表即可修復。")
     else:
-        filtered_for_top3 = today_df.copy()
-
-    # 依照「買超張數」由大到小排序，精選前 3 名
-    top3 = filtered_for_top3.sort_values(by="買超張數", ascending=False).head(3)
-
-    # ====================================================================
-    # 4. Streamlit 前端網頁視覺呈現
-    # ====================================================================
-    st.title("三大法人籌碼追蹤 · 自動化監控儀表板")
-    st.markdown(f"**數據更新日期：`{latest_date}`**")
-    
-    # 顯示計數區塊
-    st.markdown("### 值得關注")
-    st.system_font = True
-    st.markdown(f"<h1 style='font-size: 54px; margin-top: -20px;'>{total_count}</h1>", unsafe_allow_html=True)
-    
-    st.write("---")
-
-    # 顯示今日爆買精選 Top 3
-    st.subheader(f"🏆 {latest_date} 法人精選 Top 3 飆股")
-    if not top3.empty:
-        # 只顯示操盤精華欄位，避免畫面太擠
-        display_top3 = top3[["股票代號", "股票名稱", "買超張數", "目前現價", "5日均價", "超盤建議"]].copy()
-        # 格式化呈現
-        display_top3["買超張數"] = display_top3["買超張數"].map('{:,.1f} 張'.format)
-        st.dataframe(display_top3, use_container_width=True)
-    else:
-        st.info("💡 今日暫無符合強烈推薦標準的 Top 3 標的。")
-
-    st.write("---")
-
-    # 顯示全標的詳細清單
-    st.subheader(f"📅 {latest_date} 詳細標的清單 (買超 ≥ 500張)")
-    if not today_df.empty:
-        # 排好順序：日期 -> 買超張數由大到小
-        final_list = today_df.sort_values(by="買超張數", ascending=False).copy()
-        
-        # 格式化百分比與百萬千分位
-        if "價差%" in final_list.columns:
-            final_list["價差%"] = final_list["價差%"].map('{:.2%}'.format)
-        final_list["買超張數"] = final_list["買超張數"].map('{:,.1f}'.format)
-        
-        # 輸出完整標準 A~J 欄位
-        st.dataframe(
-            final_list[["日期", "股票代號", "股票名稱", "關鍵分點", "買超張數", "5日均價", "目前現價", "價差%", "出現天數", "超盤建議"]],
-            use_container_width=True
-        )
-    else:
-        st.warning("查無今日籌碼資料，請確認 Google Apps Script 自動下載是否正常執行。")
-
-except KeyError as e:
-    st.error(f"❌ 欄位解析失敗，找不到欄位: {e}")
-    st.info("💡 解決辦法：請點擊右上角三點選單點選「Clear cache」，並確認 Google 試算表第一行標頭是否正確。")
-except Exception as e:
-    st.error(f"應用程式執行時發生非預期錯誤: {e}")
+        try:
+            # 2.3 資料型態安全轉換（防呆，避免將文字拿來做排序或計算）
+            df["買超_n"] = pd.to_numeric(df["法人買超(張)"], errors='coerce').fillna(0)
+            df["股票代號"] = df["股票代號"].astype(str).str.replace("'", "").str.strip()
+            
+            if "價差%" in df.columns:
+                df["價差%"] = pd.to_numeric(df["價差%"], errors='coerce').fillna(0)
+            
+            # 2.4 自動抓取最新一個交易日的日期 (假設資料流已排序，第一筆即為最新日)
+            latest_date = df["日期"].iloc[0] if not df.empty else "未知的交易日"
+            
+            # 2.5 篩選出該最新日期的所有標的
+            today_df = df[df["日期"] == latest_date].copy()
+            
+            # ==========================================
+            # 3. 核心大戶籌碼邏輯計算 (Top 3 精選)
+            # ==========================================
+            # 篩選今日數據中，推薦等級包含「推薦」或「關注」的股票（排除謹蹤或普通股）
+            filtered_df = today_df[today_df["推薦等級"].str.contains("推薦|關注", na=False)].copy()
+            
+            # 根據剛才轉好的「買超_n」欄位進行由大到小的排序，並取出前三名
+            top3 = filtered_df.sort_values(by="買超_n", ascending=False).head(3)
+            
+            # ==========================================
+            # 4. 渲染 Streamlit 前端網頁畫面
+            # ==========================================
+            # 顯示當前盯盤的日期
+            st.info(f"📅 當前監控交易日：{latest_date} (資料已對齊最新法人買賣超)")
+            
+            # 側邊欄區塊：提供快速查看基礎統計
+            st.sidebar.markdown("### 📊 盤後數據統計")
+            st.sidebar.metric(label="今日監控總標的數", value=f"{len(today_df)} 檔")
+            st.sidebar.metric(label="法人重點關注檔數", value=f"{len(filtered_df)} 檔")
+            
+            # 區塊 A：今日最強 Top 3 精選標的
+            st.markdown("---")
+            st.markdown("### 🏆 今日法人大戶爆買精選 Top 3")
+            
+            if not top3.empty:
+                # 漂亮呈現 Top 3 清單
+                st.dataframe(
+                    top3[["股票代號", "股票名稱", "法人買超(張)", "目前現價", "5日均價(MA5)", "推薦等級", "操盤建議"]],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("💡 提示：今日暫無符合「強烈推薦」或「值得關注」標準的 Top 3 大戶爆買標的。")
+            
+            # 區塊 B：全交易日大清單
+            st.markdown("---")
+            st.markdown(f"### 📋 {latest_date} 全標的監控清單 (買超 ≥ 500張)")
+            
+            # 完整呈現今日所有抓到的股票
+            display_cols = ["股票代號", "股票名稱", "法人買超(張)", "目前現價", "5日均價(MA5)", "建議買價", "预估目標價", "推薦等級", "操盤建議"]
+            # 防呆：確保要顯示的欄位在今日 DataFrame 中都有，沒有的就自動忽略
+            available_display_cols = [c for c in display_cols if c in today_df.columns]
+            
+            st.dataframe(
+                today_df[available_display_cols],
+                use_container_width=True,
+                hide_index=True
+            )
+            
+        except Exception as e:
+            st.error(f"💥 運算籌碼資料時發生非預期錯誤: {e}")
+            st.info("建議檢查 Google 試算表內特定欄位的儲存格內容是否有文字與數字混雜的情況。")
