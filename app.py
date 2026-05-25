@@ -1,57 +1,62 @@
+# ===== Python Streamlit 終極收官完美版 (自動 URL 編碼防呆) =====
 import streamlit as st
 import pandas as pd
+import urllib.parse
 
 st.set_page_config(layout="wide")
-st.title(" 📊 三大法人籌碼監控儀表板")
+st.title("📊 三大法人籌碼監控儀表板")
 
-# ===== 終極分頁 ID 雷射綁定法 =====
-SPREADSHEET_ID = "1GjcN6DSFWwJG14bPyMW8aNUkE70Auz6BQFPJ9EGzR38"
-# 鎖定包含「日期、股票代號、股票名稱、法人買超(張)...」的正確分頁 GID
-GID = "643915918"  
+# ==================== [ 關鍵設定區 ] ====================
+# 🔴 請務必將下方的字串換成你 Google 試算表網址列上的那一串長代碼！
+SPREADSHEET_ID = "請在此處貼上你的Google試算表ID" 
+SHEET_NAME = "stock_Sheet"
+# =======================================================
 
-# 透過 Google Sheets 網頁端原生的 CSV 導出端點獲取資料，完全不用裝額外套件
-csv_url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=csv&gid={GID}"
+# 安全處理：將中文字的工作表名稱轉為網址看得懂的編碼 (避免 400 Bad Request)
+encoded_sheet_name = urllib.parse.quote(SHEET_NAME)
+csv_url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={encoded_sheet_name}"
 
-@st.cache_data(ttl=30)  # 快取設為 30 秒，方便即時排錯調試
+@st.cache_data(ttl=60)  # 快取 1 分鐘，方便你測試時即時看動態
 def load_data(url):
     try:
-        # 強制指定前兩欄為字串型態，嚴防 00403A、02001R 等特殊代號的開頭 0 被吃掉
+        # 強制將關鍵欄位當字串讀取，防止股票代號開頭的 0 被吃掉
         return pd.read_csv(url, dtype={"日期": str, "股票代號": str})
     except Exception as e:
-        st.error(f"❌ 無法從 Google 試算表指定分頁讀取資料: {e}")
+        st.error(f"❌ 從 Google Sheets 讀取資料失敗: {e}")
         return None
 
+# 讀取資料
 df = load_data(csv_url)
 
-# --- 核心資料處理與對齊 ---
+# --- 資料處理與畫面呈現 ---
 if df is None or df.empty:
-    st.warning("⚠️ 讀取到的分頁目前沒有資料，或尚未開啟共用權限。請確認試算表已開啟「知道連結的任何人都能檢視」。")
+    st.warning("⚠️ 讀取到的分頁目前沒有資料，或尚未開啟共用權限。請確認試算表已開啟「 know link 的任何人都能檢視 」，且 ID 填寫正確。")
 else:
-    # 1. 欄位名稱去除看不見的空白字元
+    # 1. 欄位名稱極致清理（防止隱形空白或特殊字元干擾）
     df.columns = [str(c).strip() for c in df.columns]
     
-    # 2. 嚴格檢查這 8 個在 Streamlit 畫面上必須呈現的黃金核心欄位
+    # 2. 欄位安全檢查
     required_cols = ["日期", "股票代號", "股票名稱", "法人買超(張)", "目前現價", "5日均價(MA5)", "推薦等級", "操盤建議"]
     missing_cols = [col for col in required_cols if col not in df.columns]
     
     if missing_cols:
-        st.error(f"❌ 試算表欄位不匹配！目前讀取到的欄位為: {list(df.columns)}")
-        st.info(f"缺少了必要的欄位: {missing_cols}，請檢查你的 Google 試算表第一行（Row 1）表頭文字是否正確。")
+        st.error(f"❌ 試算表欄位不匹配！目前缺少欄位: {missing_cols}")
+        st.info("💡 偵測到你的試算表標頭可能長得不一樣，目前抓到的表頭有：\n" + ", ".join(df.columns))
     else:
         try:
-            # 3. 資料型態安全轉換，杜絕所有排序或篩選時的 KeyError
+            # 3. 資料型態強制轉換，避免排序崩潰
             df["買超_n"] = pd.to_numeric(df["法人買超(張)"], errors='coerce').fillna(0)
             df["股票代號"] = df["股票代號"].astype(str).str.replace("'", "").str.strip()
             
-            # 4. 撈出試算表中最頂部（最新交易日）的資料
-            latest_date = df["日期"].dropna().iloc[0] if not df.empty else "無資料日期"
+            # 4. 取得最新交易日的資料
+            latest_date = df["日期"].iloc[0] if not df.empty else "未知的日期"
             today_df = df[df["日期"] == latest_date].copy()
             
-            # 5. 精選 Top 3 邏輯（只抓「推薦等級」裡有包含推薦、關注星星的股票，並按買超張數排序）
-            filtered_df = today_df[today_df["推薦等級"].astype(str).str.contains("推薦|關注", na=False)].copy()
+            # 5. 精選 Top 3 邏輯
+            filtered_df = today_df[today_df["推薦等級"].str.contains("推薦|關注", na=False)].copy()
             top3 = filtered_df.sort_values(by="買超_n", ascending=False).head(3)
             
-            # 6. Streamlit 前端網頁精緻呈現
+            # 6. 渲染 Streamlit 畫面
             st.markdown(f"### 📅 當前監控交易日：{latest_date}")
             
             st.markdown("### 🏆 今日法人大戶爆買精選 Top 3")
@@ -71,4 +76,4 @@ else:
             )
             
         except Exception as e:
-            st.error(f"💥 運行資料時發生非預期錯誤: {e}")
+            st.error(f"💥 運算資料時發生非預期錯誤: {e}")
