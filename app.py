@@ -1,4 +1,4 @@
-# ===== Python Streamlit 帳號直連 + 雙層標頭完美對齊版 =====
+# ===== Python Streamlit 帳號直連 + 完美對齊還原版 =====
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
@@ -6,45 +6,33 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(layout="wide")
 st.title("📊 三大法人籌碼監控儀表板")
 
-# --- 1. 使用你原本就綁定好的 Google 帳號直連讀取 ---
+# --- 1. 使用你綁定好的 Google 帳號直接撈取資料 ---
 try:
-    # 這裡會直接吃你後台設定好的帳號憑證，完全不需要手動貼 ID 網址！
     conn = st.connection("gsheets", type=GSheetsConnection)
-    raw_df = conn.read(worksheet="stock_Sheet")
+    # 這裡完全自動吃你後台綁定的帳號權限
+    df_raw = conn.read(worksheet="stock_Sheet")
 except Exception as e:
     st.error(f"❌ 透過 Google 帳號讀取試算表失敗，請檢查後台連線設定。錯誤訊息: {e}")
     st.stop()
 
-# --- 2. 核心修正：處理雙層標頭（跳過第一行舊標頭，將第二行設為欄位） ---
-if raw_df is None or raw_df.empty:
+# --- 2. 資料結構極致防呆與清理 ---
+if df_raw is None or df_raw.empty:
     st.warning("⚠️ 讀取到的分頁目前沒有資料，請確認 stock_Sheet 內有內容。")
 else:
-    try:
-        # 修正錯位：直接將第 1 行（Python 索引 0）當作真正的欄位名稱
-        # 並把後面的資料切下來當作真正的內容
-        corrected_df = raw_df.copy()
-        
-        # 抓取你試算表第二行的中文字（日期、股票代號、股票名稱...）
-        new_columns = [str(c).strip() for c in corrected_df.iloc[0].tolist()]
-        corrected_df.columns = new_columns
-        
-        # 切掉第一行（因為那一行已經被拿來當欄位名稱了）
-        df = corrected_df.iloc[1:].reset_index(drop=True)
-        
-        # 欄位名稱再次極致清理，防止隱形空白
-        df.columns = [str(c).strip() for c in df.columns]
-        
-    except Exception as e:
-        st.error(f"💥 處理雙層標頭對齊時發生錯誤: {e}")
-        st.stop()
-
-    # --- 3. 欄位安全檢查與呈現 ---
+    # 清理欄位名稱（去除任何隱形空白）
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+    
+    # 🔥 關鍵修正：丟棄因為篩選器產生的第二行空資料 (NaN)
+    # 只要「股票代號」或「股票名稱」是空的，就代表不是真正的股票資料，直接過濾掉
+    df = df_raw.dropna(subset=["股票代號", "股票名稱"], how="any").copy()
+    
+    # --- 3. 欄位存在檢查 ---
     required_cols = ["日期", "股票代號", "股票名稱", "關鍵分點", "買超張數", "5日均價", "目前現價", "價差%", "連續出現天數", "集保人數變動", "最佳購買日期", "超盤建議"]
     missing_cols = [col for col in required_cols if col not in df.columns]
     
     if missing_cols:
         st.error(f"❌ 試算表欄位不匹配！目前缺少欄位: {missing_cols}")
-        st.info("💡 目前從第二行自動對齊到的表頭有：\n" + ", ".join(df.columns))
+        st.info("💡 目前抓到的表頭有：\n" + ", ".join(df.columns))
     else:
         try:
             # 資料型態轉換，防止排序或格式化崩潰
