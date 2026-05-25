@@ -8,20 +8,14 @@ warnings.filterwarnings('ignore')
 import gspread
 from google.oauth2.service_account import Credentials
 
+# 1. 網頁基本設定 (預設寬螢幕模式)
 st.set_page_config(page_title="台股法人操盤系統", page_icon="📈", layout="wide")
 
 SHEET_ID = "1GjcN6DSFWwJG14bPyMW8aNUkE70Auz6BQFPJ9EGzR38"
 STOCK_SHEET = "stock_Sheet"
 GAS_URL = "https://script.google.com/macros/s/AKfycbwbNmQfyI0zvyXlSuGOemID25o0EDtoAyl7hoZ3zfYtgpSES0w69e8GrIRzfSzUMVuy/exec"
 
-# 欄位定義
-COL_NAMES = [
-    "日期", "股票代號", "股票名稱", "關鍵分點", "買超張數",
-    "現價", "MA5均價", "建議買價", "預估目標價", "預估獲利%",
-    "發動天數", "推薦等級", "操盤建議", "價差%", "法人強度"
-]
-
-
+# 2. Google Sheets 連線快取機制
 @st.cache_resource
 def get_gspread_client():
     scopes = [
@@ -33,12 +27,11 @@ def get_gspread_client():
     )
     return gspread.authorize(creds)
 
-
 def get_worksheet(name):
     client = get_gspread_client()
     return client.open_by_key(SHEET_ID).worksheet(name)
 
-
+# 3. 資料讀取與精準欄位對齊
 @st.cache_data(ttl=300)
 def load_stock_data():
     try:
@@ -46,17 +39,25 @@ def load_stock_data():
         data = ws.get_all_values()
         if len(data) <= 1:
             return pd.DataFrame()
+        
         headers = data[0]
-        df = pd.DataFrame(data[1:], columns=headers)
-        # 只取需要的欄位
-        existing = [c for c in COL_NAMES if c in df.columns]
+        rows = data[1:]
+        df = pd.DataFrame(rows, columns=headers)
+        
+        # 🎯 精準對齊全新的 13 個 GAS 黃金欄位名稱，徹底排除錯字
+        needed = [
+            "日期", "股票代號", "股票名稱", "法人買超(張)", "目前現價", 
+            "5日均價(MA5)", "建議買價", "預估目標價", "價差%", 
+            "連續發動天數", "推薦等級", "法人強度", "操盤建議"
+        ]
+        
+        existing = [c for c in needed if c in df.columns]
         if existing:
             df = df[existing]
         return df
     except Exception as e:
         st.error("讀取失敗：" + str(e))
         return pd.DataFrame()
-
 
 @st.cache_data(ttl=300)
 def get_existing_dates():
@@ -67,280 +68,176 @@ def get_existing_dates():
     except:
         return set()
 
-
 def trigger_gas(action="backfill"):
+    """呼叫 Apps Script Web App 觸發下載"""
     try:
         resp = requests.get(
             GAS_URL + "?action=" + action,
             timeout=60,
             allow_redirects=True
         )
-        return True, resp.text
+        return resp.status_code == 200, resp.text
     except requests.exceptions.Timeout:
-        return False, "逾時（Apps Script 仍在背景執行）"
+        return False, "請求逾時（Apps Script 仍在背景執行中）"
     except Exception as e:
         return False, str(e)
 
 
-def to_numeric_safe(series):
-    return pd.to_numeric(series, errors='coerce').fillna(0)
-
-
-# ====================== 介面 ======================
+# ====================== 🚀 介面優化：精簡化頂部版面 ======================
 
 st.markdown("""
 <style>
 .hdr {
-    background: linear-gradient(135deg, #0f0f23, #1a1a3e);
-    padding: 20px 30px; border-radius: 12px;
-    margin-bottom: 20px; border: 1px solid #00d4ff33;
+    background: #0f0f23;
+    padding: 8px 15px; 
+    border-radius: 6px;
+    margin-bottom: 10px; 
+    border-left: 5px solid #00d4ff;
 }
-.hdr h1 { color: #00d4ff; margin: 0; font-size: 1.6rem; }
-.hdr p { color: #8899aa; margin: 4px 0 0; font-size: .85rem; }
-.recommend-box {
-    background: #1a1a2e; border-radius: 10px;
-    padding: 15px; margin: 8px 0;
-    border-left: 4px solid #00d4ff;
-}
+.hdr h3 { color: #00d4ff; margin: 0; display: inline-block; font-size: 1.2rem; }
+.hdr span { color: #8899aa; margin-left: 15px; font-size: .85rem; }
+/* 移除 Streamlit 預設的上邊距，讓表格升到最高 */
+.block-container { padding-top: 1.5rem !important; padding-bottom: 1rem !important; }
 </style>
 <div class="hdr">
-    <h1>📈 台股法人操盤系統</h1>
-    <p>三大法人籌碼追蹤 · 智能推薦等級 · 每日自動更新</p>
+    <h3>台股法人操盤系統</h3>
+    <span>三大法人籌碼追蹤 · 自動化監控儀表板</span>
 </div>
 """, unsafe_allow_html=True)
 
-# ── 側邊欄 ──
-with st.sidebar:
-    st.title("操盤工具箱")
-    mode = st.radio("功能切換", ["今日強勢推薦", "籌碼週期分析", "資料庫管理"], index=0)
-    st.markdown("---")
 
+# ====================== 🛠️ 側邊欄：功能與數據統計 ======================
+with st.sidebar:
+    st.subheader("📊 系統狀態與統計")
+    
+    # 讀取資料供狀態欄與主畫面使用
+    df = load_stock_data()
+    
     try:
         edates = get_existing_dates()
         valid = sorted([d for d in edates if d and len(d) > 5], reverse=True)
-        if valid:
-            st.success("最新：" + valid[0])
-            st.info("共 " + str(len(valid)) + " 個交易日")
+        if valid and not df.empty:
+            latest_date = df["日期"].max()
+            today_df = df[df["日期"] == latest_date].copy()
+            
+            # 將原本佔據大版面的數據卡片，精簡縮小到側邊欄
+            st.metric("最新交易日期", latest_date)
+            st.metric("今日篩選標的數", f"{len(today_df)} 檔")
+            st.metric("資料庫總記錄筆數", f"{len(df)} 筆")
         else:
             st.warning("尚無資料")
+            latest_date = None
+            today_df = pd.DataFrame()
     except Exception as e:
         st.error("連線失敗：" + str(e))
+        latest_date = None
+        today_df = pd.DataFrame()
 
     st.markdown("---")
+    mode = st.radio("功能切換", ["今日強勢戰報", "籌碼週期分析", "資料庫管理"], index=0)
+    st.markdown("---")
 
+    st.subheader("🔄 資料更新")
     if st.button("自動補抓缺失資料", type="primary", use_container_width=True):
-        with st.spinner("通知 Apps Script 補抓中..."):
+        with st.spinner("正在通知 Apps Script 補抓資料..."):
             ok, msg = trigger_gas("backfill")
-            st.info("指令已送出！Apps Script 正在背景執行\n約 2-3 分鐘後按「重新整理」")
+            if ok:
+                st.success("補抓指令已送出！")
+            else:
+                st.warning("指令已送出（逾時不代表失敗）")
 
     if st.button("重新整理資料", use_container_width=True):
         load_stock_data.clear()
         get_existing_dates.clear()
-        st.success("已重新載入！")
-        time.sleep(1)
+        st.success("快取已清除！")
+        time.sleep(0.5)
         st.rerun()
 
-    st.markdown("---")
-    st.markdown("""
-**📖 推薦等級說明**
-- ⭐⭐⭐ 強烈推薦：發動1-2天+大量買超
-- ⭐⭐ 值得關注：發動初期或穩定買超
-- ⭐ 謹慎追蹤：已發動多天，追高需謹慎
-
-**💡 操盤心法**
-法人第1天進場是最佳時機，第2天確認後可加碼，第3天以後要等回測再進場。
-    """)
+    st.caption("每天下午 5 點自動更新，或手動點擊上方按鈕")
 
 
-# ── 主畫面 ──
-st.header(mode)
+# ====================== ── 主畫面：聚焦詳細資料 ── ======================
 
-df_raw = load_stock_data()
+if df.empty:
+    st.warning("尚無資料，請點左側「自動補抓缺失資料」按鈕。")
+else:
+    # 預先處理數值轉換，避免排序噴錯
+    df["買超_n"] = pd.to_numeric(df["法人買超(張)"], errors='coerce').fillna(0)
+    df["天數_n"] = pd.to_numeric(df["連續發動天數"], errors='coerce').fillna(0)
+    
+    if latest_date:
+        today_df = df[df["日期"] == latest_date].copy()
 
-if df_raw.empty:
-    st.warning("尚無資料，請點左側「自動補抓缺失資料」。")
-    st.stop()
+    # ── 功能一：今日強勢戰報 ──
+    if mode == "今日強勢戰報":
+        st.subheader(f"📅 {latest_date} 詳細標的清單 (買超 >= 500張)", anchor=False)
+        
+        # 依連續天數、買超張數降序排序
+        if not today_df.empty:
+            today_df = today_df.sort_values(
+                by=["天數_n", "買超_n"], ascending=[False, False]
+            ).drop(columns=["買超_n", "天數_n"])
+        
+        # 🎯 核心：直接展現超大滿版詳細資料表格
+        st.dataframe(today_df, use_container_width=True, hide_index=True, height=550)
 
-latest_date = df_raw["日期"].max() if "日期" in df_raw.columns else ""
-today_df = df_raw[df_raw["日期"] == latest_date].copy() if latest_date else pd.DataFrame()
+        with st.expander("🔍 查看歷史完整資料庫明細"):
+            st.dataframe(df.sort_values(by=["日期", "天數_n"], ascending=[False, False]).drop(columns=["買超_n", "天數_n"]), use_container_width=True, hide_index=True)
 
-# 數值欄位轉換
-for col in ["買超張數", "現價", "MA5均價", "建議買價", "預估目標價", "發動天數"]:
-    if col in today_df.columns:
-        today_df[col] = to_numeric_safe(today_df[col])
+    # ── 功能二：籌碼週期分析 ──
+    elif mode == "籌碼週期分析":
+        st.subheader(f"🎯 籌碼多週期篩選明細 ({latest_date})", anchor=False)
+        
+        # 小指標區
+        c1, c2, c3 = st.columns(3)
+        c1.markdown(f"**🔥 法人鎖碼 (>=3天)：** `{len(today_df[today_df['天數_n'] >= 3])}` 檔")
+        c2.markdown(f"**💪 大主力買超 (>=1000張)：** `{len(today_df[today_df['買超_n'] >= 1000])}` 檔")
+        c3.markdown(f"**🚀 首次發動新標的：** `{len(today_df[today_df['天數_n'] == 1])}` 檔")
+        
+        tab1, tab2, tab3 = st.tabs(["🔒 法人鎖碼明細", "⚡ 雙強初現明細", "🚀 首次發動明細"])
 
-for col in ["預估獲利%", "價差%"]:
-    if col in today_df.columns:
-        today_df[col] = pd.to_numeric(today_df[col], errors='coerce')
-        today_df[col] = today_df[col].apply(
-            lambda x: "{:.1f}%".format(x * 100) if pd.notna(x) and x != 0 else "-"
-        )
+        with tab1:
+            d1 = today_df[today_df["天數_n"] >= 3].sort_values(by=["天數_n", "買超_n"], ascending=[False, False]).drop(columns=["買超_n", "天數_n"])
+            if d1.empty: st.info("今日無法人持續鎖碼標的")
+            else: st.dataframe(d1, use_container_width=True, hide_index=True, height=450)
 
-# ── 今日強勢推薦 ──
-if mode == "今日強勢推薦":
+        with tab2:
+            d2 = today_df[(today_df["買超_n"] >= 1000) & (today_df["天數_n"] <= 2)].sort_values(by="買超_n", ascending=False).drop(columns=["買超_n", "天數_n"])
+            if d2.empty: st.info("今日無雙強初現標的")
+            else: st.dataframe(d2, use_container_width=True, hide_index=True, height=450)
 
-    # 統計卡片
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("最新日期", latest_date)
-    c2.metric("今日標的數", len(today_df))
+        with tab3:
+            d3 = today_df[today_df["天數_n"] == 1].sort_values(by="買超_n", ascending=False).drop(columns=["買超_n", "天數_n"])
+            if d3.empty: st.info("今日無新發動標的")
+            else: st.dataframe(d3, use_container_width=True, hide_index=True, height=450)
 
-    if "推薦等級" in today_df.columns:
-        top = today_df[today_df["推薦等級"].str.contains("⭐⭐⭐", na=False)]
-        c3.metric("強烈推薦", len(top))
-        mid = today_df[today_df["推薦等級"].str.contains("⭐⭐ 值", na=False)]
-        c4.metric("值得關注", len(mid))
+        st.markdown("---")
+        st.subheader("📈 全市場連續發動天數強勢榜 TOP 30", anchor=False)
+        rank_df = today_df.sort_values(by=["天數_n", "買超_n"], ascending=[False, False]).drop(columns=["買超_n", "天數_n"]).head(30)
+        st.dataframe(rank_df, use_container_width=True, hide_index=True)
 
-    st.markdown("---")
+    # ── 功能三：資料庫管理 ──
+    elif mode == "資料庫管理":
+        st.subheader("⚙️ 後端資料庫串接管理", anchor=False)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"🔗 [點此直接開啟 Google 試算表原檔](https://docs.google.com/spreadsheets/d/{SHEET_ID})")
+            if st.button("測試 Google Sheets API 連線狀態", use_container_width=True):
+                try:
+                    ws = get_worksheet(STOCK_SHEET)
+                    st.success("連線成功！當前指向工作表： " + ws.title)
+                except Exception as e:
+                    st.error("連線失敗：" + str(e))
 
-    # 強烈推薦區塊
-    if "推薦等級" in today_df.columns:
-        top3 = today_df[today_df["推薦等級"].str.contains("⭐⭐⭐", na=False)].sort_values(
-            by="買超張數", ascending=False
-        )
+        with col2:
+            target_input = st.date_input("手動指定日期強制補抓", value=datetime.now().date() - timedelta(days=1))
+            if st.button("執行指定日期補抓", use_container_width=True):
+                date_str = target_input.strftime('%Y%m%d')
+                with st.spinner(f"通知 Apps Script 補抓 {date_str} 中..."):
+                    ok, msg = trigger_gas(f"single&date={date_str}")
+                    if ok: st.success("指令已成功送出！請靜候 1 分鐘後重新整理。")
+                    else: st.error("補抓失敗：" + msg)
 
-        if not top3.empty:
-            st.subheader("🔥 今日強烈推薦（發動初期 + 大量買超）")
-            display_cols = [c for c in [
-                "股票代號", "股票名稱", "買超張數", "現價",
-                "MA5均價", "建議買價", "預估目標價", "預估獲利%",
-                "發動天數", "推薦等級", "操盤建議", "法人強度"
-            ] if c in top3.columns]
-            st.dataframe(top3[display_cols], use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-
-    # 值得關注
-    if "推薦等級" in today_df.columns:
-        mid2 = today_df[today_df["推薦等級"].str.contains("⭐⭐", na=False)].sort_values(
-            by="買超張數", ascending=False
-        )
-        if not mid2.empty:
-            st.subheader("👀 值得關注")
-            display_cols = [c for c in [
-                "股票代號", "股票名稱", "買超張數", "現價",
-                "建議買價", "預估目標價", "預估獲利%",
-                "發動天數", "推薦等級", "操盤建議"
-            ] if c in mid2.columns]
-            st.dataframe(mid2[display_cols], use_container_width=True, hide_index=True)
-
-    # 全部今日資料
-    with st.expander("📋 今日全部標的"):
-        st.dataframe(today_df, use_container_width=True, hide_index=True)
-
-    with st.expander("📂 歷史資料"):
-        st.dataframe(df_raw, use_container_width=True, hide_index=True)
-
-
-# ── 籌碼週期分析 ──
-elif mode == "籌碼週期分析":
-
-    for col in ["買超張數", "發動天數"]:
-        if col in today_df.columns:
-            today_df[col] = to_numeric_safe(today_df[col])
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("基準日", latest_date)
-    if "發動天數" in today_df.columns:
-        c2.metric("法人鎖碼 ≥3天", len(today_df[today_df["發動天數"] >= 3]))
-        c3.metric("發動第1天", len(today_df[today_df["發動天數"] == 1]))
-        c4.metric("發動第2天", len(today_df[today_df["發動天數"] == 2]))
-
-    st.markdown("---")
-
-    tab1, tab2, tab3, tab4 = st.tabs(["⭐⭐⭐ 強烈推薦", "🚀 第1天發動", "✅ 第2天確認", "🔒 法人鎖碼"])
-
-    display_cols = [c for c in [
-        "股票代號", "股票名稱", "買超張數", "現價",
-        "MA5均價", "建議買價", "預估目標價", "預估獲利%",
-        "發動天數", "推薦等級", "操盤建議", "法人強度"
-    ] if c in today_df.columns]
-
-    with tab1:
-        if "推薦等級" in today_df.columns:
-            d = today_df[today_df["推薦等級"].str.contains("⭐⭐⭐", na=False)].sort_values(
-                by="買超張數", ascending=False
-            )
-            if d.empty:
-                st.info("今日無強烈推薦標的")
-            else:
-                st.caption("買超量大 + 發動初期，是最佳進場時機！")
-                st.dataframe(d[display_cols], use_container_width=True, hide_index=True)
-
-    with tab2:
-        if "發動天數" in today_df.columns:
-            d = today_df[today_df["發動天數"] == 1].sort_values(by="買超張數", ascending=False)
-            if d.empty:
-                st.info("今日無第1天發動標的")
-            else:
-                st.caption("法人今天剛開始進場，股價還沒反應，是最佳觀察時機")
-                st.dataframe(d[display_cols], use_container_width=True, hide_index=True)
-
-    with tab3:
-        if "發動天數" in today_df.columns:
-            d = today_df[today_df["發動天數"] == 2].sort_values(by="買超張數", ascending=False)
-            if d.empty:
-                st.info("今日無第2天確認標的")
-            else:
-                st.caption("連續第2天買超，趨勢確認！可以考慮進場")
-                st.dataframe(d[display_cols], use_container_width=True, hide_index=True)
-
-    with tab4:
-        if "發動天數" in today_df.columns:
-            d = today_df[today_df["發動天數"] >= 3].sort_values(
-                by=["發動天數", "買超張數"], ascending=[False, False]
-            )
-            if d.empty:
-                st.info("今日無法人鎖碼標的")
-            else:
-                st.caption("連續買超 ≥3 天，籌碼鎖定，等回測 MA5 再進場比較安全")
-                st.dataframe(d[display_cols], use_container_width=True, hide_index=True)
-
-
-# ── 資料庫管理 ──
-elif mode == "資料庫管理":
-    st.subheader("資料庫管理")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("[📊 開啟 Google Sheet](https://docs.google.com/spreadsheets/d/" + SHEET_ID + ")")
-        if st.button("測試連線", use_container_width=True):
-            try:
-                ws = get_worksheet(STOCK_SHEET)
-                st.success("連線成功：" + ws.title)
-            except Exception as e:
-                st.error("連線失敗：" + str(e))
-
-    with col2:
-        target_input = st.date_input(
-            "補抓指定日期",
-            value=datetime.now().date() - timedelta(days=1)
-        )
-        if st.button("補抓此日期", use_container_width=True):
-            date_str = target_input.strftime('%Y%m%d')
-            with st.spinner("通知 Apps Script..."):
-                ok, msg = trigger_gas("single&date=" + date_str)
-                st.info("指令已送出，等 1 分鐘後按「重新整理資料」")
-
-    st.markdown("---")
-    st.subheader("欄位說明")
-    st.markdown("""
-| 欄位 | 說明 |
-|------|------|
-| 現價 | GOOGLEFINANCE 即時報價 |
-| MA5均價 | 近10日平均收盤價（支撐參考）|
-| 建議買價 | MA5 和當日最低價取較低者 |
-| 預估目標價 | 現價 × 1.06（保守6%獲利目標）|
-| 預估獲利% | 目標價和現價的差距百分比 |
-| 發動天數 | 連續出現幾天 |
-| 推薦等級 | ⭐⭐⭐強烈 / ⭐⭐關注 / ⭐謹慎 |
-| 操盤建議 | 一句話告訴你現在該怎麼做 |
-| 法人強度 | 買超量的強弱分級 |
-    """)
-
-    st.markdown("---")
-    st.subheader("最新 50 筆資料")
-    if not df_raw.empty:
-        st.dataframe(df_raw.tail(50), use_container_width=True, hide_index=True)
-    else:
-        st.info("尚無資料")
+        st.markdown("---")
+        st.subheader("📋 雲端資料庫最新 50 筆原始紀錄流水帳", anchor=False)
+        st.dataframe(df.tail(50), use_container_width=True, hide_index=True)
